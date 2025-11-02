@@ -1,6 +1,5 @@
 import { DocumentoFiscalDetalhado, ClassificationResult, TipoOperacao, Setor, LogError } from '../types.ts';
-// FIX: 'callGeminiWithRetry' is not exported. The correct exported function is 'callGeminiThrottled'.
-import { callGeminiThrottled, parseGeminiJsonResponse } from './geminiService.ts';
+import { callGeminiWithRetry, parseGeminiJsonResponse } from './geminiService.ts';
 import { storeClassifications } from './contextMemory.ts';
 
 const fallbackClassify = (doc: DocumentoFiscalDetalhado): { tipo_operacao: TipoOperacao; setor: Setor } => {
@@ -76,8 +75,7 @@ export async function classificarNotas(
                 ${JSON.stringify(resumosParaIA, null, 2)}
             `;
 
-            // FIX: Corrected function name to 'callGeminiThrottled' and adjusted arguments to match its signature (parts, isJsonMode, logError).
-            const response = await callGeminiThrottled([{ text: prompt }], true, logError);
+            const response = await callGeminiWithRetry([prompt], logError, true);
             const resultadosLote = parseGeminiJsonResponse<any[]>(response.text, logError);
             
             if (!Array.isArray(resultadosLote) || resultadosLote.length !== batchDocs.length) {

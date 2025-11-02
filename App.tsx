@@ -7,11 +7,11 @@ import { Dashboard } from './components/dashboard/Dashboard.tsx';
 import { ErrorLogModal } from './components/ErrorLogModal.tsx';
 import { INITIAL_PIPELINE_STEPS } from './constants.ts';
 import { generateReportFromFiles, getFileContentForAnalysis, getFullContentForIndexing } from './services/geminiService.ts';
-import { ExecutiveSummary, GeneratedReport, PipelineStep, ProcessingStepStatus, Theme } from './types.ts';
+import { GeneratedReport, PipelineStep, ProcessingStepStatus, Theme } from './types.ts';
 import { useErrorLog } from './hooks/useErrorLog.ts';
 import { getApiKey, setApiKey } from './config.ts';
 import { ApiKeyModal } from './components/ApiKeyModal.tsx';
-import { clearContext, getLastReportSummary, storeLastReportSummary, createAndStoreIndex, storeForecast, purgeOldCache } from './services/contextMemory.ts';
+import { clearContext, getLastReportSummary, storeLastReportSummary, createAndStoreIndex, storeForecast } from './services/contextMemory.ts';
 import { extrairDadosParaExportacao } from './services/exporter.ts';
 import { classificarNotas } from './services/classifier.ts';
 import { calcularPrevisoes } from './services/forecast.ts';
@@ -34,8 +34,6 @@ function App() {
   const [isAppReady, setIsAppReady] = useState(false);
 
   useEffect(() => {
-    // Purge old context memory on app start
-    purgeOldCache();
     // Start the internal audit agent in the background
     iniciarAuditoriaAutomatica();
 
@@ -70,6 +68,7 @@ function App() {
     setPipelineSteps(prevSteps => {
       const newSteps = [...prevSteps].map((step, i) => {
         if (i < index) {
+          // Fix: Corrected typo from ProcessingStep-Status to ProcessingStepStatus
           return { ...step, status: ProcessingStepStatus.COMPLETED, info: undefined };
         }
         if (i === index) {
@@ -84,6 +83,7 @@ function App() {
   const handleFileUpload = async (files: File[]) => {
     if (view === 'processing') return;
 
+    // Clear previous context before starting a new analysis
     clearContext();
 
     setError(null);
@@ -93,7 +93,7 @@ function App() {
     setProcessedFiles([]);
     setPipelineSteps(INITIAL_PIPELINE_STEPS);
 
-    const MAX_FILE_SIZE = 10 * 1024 * 1024;
+    const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB per file
     const validFiles: File[] = [];
     let oversizedFiles: string[] = [];
     const errorMessages: string[] = [];
@@ -123,7 +123,6 @@ function App() {
     }
 
     let currentProcessedFiles: File[] = [];
-    let extractedDocsForFallback: any[] = [];
 
     try {
       setUploadInfo('Preparando arquivos para análise...');
@@ -185,10 +184,13 @@ function App() {
       
       setUploadInfo(`Analisando ${currentProcessedFiles.length} arquivo(s)...`);
       
+      // --- Início do Pipeline de Análise Detalhada ---
+
+      // 1. Extração e Leitura (Dados Estruturados e Texto)
       updatePipelineStep(0, ProcessingStepStatus.IN_PROGRESS, "Extraindo dados estruturados...");
       const { documentos } = await extrairDadosParaExportacao(currentProcessedFiles);
-      extractedDocsForFallback = documentos; // Save for potential fallback
       
+      // 1.5. Cálculo de Previsões (Agente de Inteligência Preditiva)
       try {
           logError({ source: 'Forecast', message: 'Calculando previsões...', severity: 'info' });
           const forecast = calcularPrevisoes(documentos);
@@ -203,27 +205,33 @@ function App() {
       const fileContentsForAnalysis = await getFileContentForAnalysis(currentProcessedFiles, updatePipelineStep, logError);
       updatePipelineStep(0, ProcessingStepStatus.COMPLETED);
 
+      // 2. Agente Auditor (Simulado)
       updatePipelineStep(1, ProcessingStepStatus.IN_PROGRESS, "Ag. Auditor: Verificando consistência...");
       await new Promise(res => setTimeout(res, 300));
       updatePipelineStep(1, ProcessingStepStatus.COMPLETED);
 
+      // 3. Agente Classificador (IA + Fallback)
       updatePipelineStep(2, ProcessingStepStatus.IN_PROGRESS, "Ag. Classificador: Organizando informações...");
       const classifications = await classificarNotas(documentos, logError);
       updatePipelineStep(2, ProcessingStepStatus.COMPLETED);
 
+      // 4. Agente de Inteligência (Geração do Resumo)
       updatePipelineStep(3, ProcessingStepStatus.IN_PROGRESS, "Ag. Inteligência: Gerando análise executiva...");
       const executiveSummary = await generateReportFromFiles(fileContentsForAnalysis, classifications, logError);
       updatePipelineStep(3, ProcessingStepStatus.COMPLETED);
       
+      // Store the successful analysis in cognitive memory
       storeLastReportSummary(executiveSummary);
 
+      // 5. Indexação para Chat (Agente Contador/Memória)
       try {
           updatePipelineStep(4, ProcessingStepStatus.IN_PROGRESS, "Ag. Contador: Indexando conteúdo para chat...");
           const indexingContents = await getFullContentForIndexing(currentProcessedFiles, logError);
           createAndStoreIndex(indexingContents);
           updatePipelineStep(4, ProcessingStepStatus.COMPLETED, "Indexação concluída!");
       } catch (err) {
-          logError({ source: 'App.Indexing', message: 'Falha ao indexar conteúdo para o chat.', severity: 'warning', details: err });
+          logError({ source: 'App.Indexing', message: 'Falha ao indexar conteúdo para o chat. O chat pode não ter contexto.', severity: 'warning', details: err });
+          // Do not fail the entire process, just move on.
            updatePipelineStep(4, ProcessingStepStatus.COMPLETED, "Indexação com avisos.");
       }
 
@@ -238,54 +246,20 @@ function App() {
 
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'An unknown error occurred.';
+      setError(prev => prev ? `${prev}\n${errorMessage}` : errorMessage);
       logError({
-          source: 'FileUpload.Critical',
+          source: 'FileUpload',
           message: errorMessage,
           severity: 'critical',
           details: err instanceof Error ? err.stack : JSON.stringify(err)
       });
-      
-      // --- EMERGENCY FALLBACK ---
-      if (extractedDocsForFallback.length > 0) {
-        logError({ source: 'FileUpload.Fallback', message: 'Falha crítica na IA. Ativando fallback para gerar relatório local.', severity: 'warning' });
-        setError(`Falha na IA (${errorMessage}). Gerando um relatório de emergência com dados locais.`);
-        
-        // Build a best-effort summary without AI
-        const totalValue = extractedDocsForFallback.reduce((sum, doc) => sum + parseFloat(doc.total?.vNF || 0), 0);
-        const totalProducts = extractedDocsForFallback.reduce((sum, doc) => sum + doc.itens.reduce((itemSum: number, item: any) => itemSum + parseFloat(item.vProd || 0), 0), 0);
-        
-        const fallbackSummary: ExecutiveSummary = {
-          title: "Relatório de Emergência (Processado Localmente)",
-          description: `A análise por IA falhou. Este é um resumo gerado a partir de ${extractedDocsForFallback.length} documentos XML válidos extraídos.`,
-          keyMetrics: {
-            numeroDeDocumentosValidos: extractedDocsForFallback.length,
-            valorTotalDasNfes: totalValue,
-            valorTotalDosProdutos: totalProducts,
-            indiceDeConformidadeICMS: "N/A",
-            nivelDeRiscoTributario: "Alto",
-            estimativaDeNVA: 0,
-            valorTotalDeICMS: extractedDocsForFallback.reduce((sum, doc) => sum + parseFloat(doc.total?.vICMS || 0), 0),
-            valorTotalDePIS: extractedDocsForFallback.reduce((sum, doc) => sum + parseFloat(doc.total?.vPIS || 0), 0),
-            valorTotalDeCOFINS: extractedDocsForFallback.reduce((sum, doc) => sum + parseFloat(doc.total?.vCOFINS || 0), 0),
-            valorTotalDeISS: 0,
-          },
-          actionableInsights: [{ text: "A análise completa da IA falhou. Verifique os logs de erro e a chave da API. Os dados apresentados são brutos e não foram interpretados." }],
-        };
-        
-        setGeneratedReport({ executiveSummary: fallbackSummary, fullTextAnalysis: "Análise textual indisponível devido à falha da API." });
-        setView('dashboard');
-        updatePipelineStep(3, ProcessingStepStatus.COMPLETED, "Relatório de emergência gerado.");
+      const currentStepIndex = pipelineSteps.findIndex(s => s.status === ProcessingStepStatus.IN_PROGRESS);
+      if (currentStepIndex !== -1) {
+        updatePipelineStep(currentStepIndex, ProcessingStepStatus.FAILED);
       } else {
-        // No documents even parsed, it's a hard failure.
-        setError(prev => prev ? `${prev}\n${errorMessage}` : errorMessage);
-        const currentStepIndex = pipelineSteps.findIndex(s => s.status === ProcessingStepStatus.IN_PROGRESS);
-        if (currentStepIndex !== -1) {
-          updatePipelineStep(currentStepIndex, ProcessingStepStatus.FAILED);
-        } else {
-          updatePipelineStep(0, ProcessingStepStatus.FAILED);
-        }
-        setTimeout(() => setView('upload'), 3000);
+        updatePipelineStep(0, ProcessingStepStatus.FAILED);
       }
+      setTimeout(() => setView('upload'), 3000);
       console.error("Failed to process files or generate report:", err);
     }
   };
@@ -306,7 +280,9 @@ function App() {
       case 'upload':
         return (
           <div className={commonWrapperClasses}>
+            {/* Hero Section */}
             <section className="text-center mb-12 px-4 animate-subtle-bob">
+                
                 <p className="text-content-default leading-relaxed max-w-3xl mx-auto">
                     Nexus QuantumI2A2 é um ecossistema inteligente de análise e decisão fiscal que combina processamento automatizado, inteligência adaptativa e visão estratégica. Integrando múltiplas camadas de IA, o sistema transforma dados fiscais complexos em conhecimento acionável — oferecendo precisão analítica, automação contínua e insights que evoluem com o contexto tributário.
                 </p>
@@ -329,6 +305,7 @@ function App() {
         if (generatedReport) {
           return <Dashboard initialReport={generatedReport} processedFiles={processedFiles} onAnalyzeOther={handleAnalyzeOtherFiles} logError={logError} />;
         }
+        // This case handles session resume where dashboard is the view but report is still loading from memory
         return (
              <div className={commonWrapperClasses}>
                 <p>Restaurando sessão...</p>
