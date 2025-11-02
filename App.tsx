@@ -9,6 +9,9 @@ import { INITIAL_PIPELINE_STEPS } from './constants.ts';
 import { generateReportFromFiles } from './services/geminiService.ts';
 import { GeneratedReport, PipelineStep, ProcessingStepStatus, Theme } from './types.ts';
 import { useErrorLog } from './hooks/useErrorLog.ts';
+import { getApiKey, setApiKey } from './config.ts';
+import { ApiKeyModal } from './components/ApiKeyModal.tsx';
+import { clearContext, getLastReportSummary, storeLastReportSummary } from './services/contextMemory.ts';
 
 type View = 'upload' | 'processing' | 'dashboard';
 
@@ -22,24 +25,58 @@ function App() {
   const [theme, setTheme] = useState<Theme>('dark');
   const [isErrorLogOpen, setIsErrorLogOpen] = useState(false);
   const { logError } = useErrorLog();
+  
+  const [isApiKeyModalOpen, setIsApiKeyModalOpen] = useState(false);
+  const [isAppReady, setIsAppReady] = useState(false);
 
   useEffect(() => {
+    // Check for API key first
+    if (getApiKey()) {
+      setIsAppReady(true);
+      setIsApiKeyModalOpen(false);
+
+      // Attempt to resume session from cognitive memory
+      const lastSummary = getLastReportSummary();
+      if (lastSummary) {
+        setGeneratedReport({ executiveSummary: lastSummary, fullTextAnalysis: undefined });
+        // Since we don't store files, we'll show a placeholder
+        setUploadInfo("Sessão anterior restaurada a partir da memória cognitiva.");
+        setView('dashboard');
+      }
+
+    } else {
+      setIsApiKeyModalOpen(true);
+    }
+    
     document.body.classList.toggle('light-theme', theme === 'light');
   }, [theme]);
 
-  const updatePipelineStep = useCallback((index: number, status: ProcessingStepStatus) => {
+  const handleSaveApiKey = (key: string) => {
+    setApiKey(key);
+    setIsAppReady(true);
+    setIsApiKeyModalOpen(false);
+  };
+
+  const updatePipelineStep = useCallback((index: number, status: ProcessingStepStatus, info?: string) => {
     setPipelineSteps(prevSteps => {
-      const newSteps = [...prevSteps];
-      for (let i = 0; i < index; i++) {
-        newSteps[i] = { ...newSteps[i], status: ProcessingStepStatus.COMPLETED };
-      }
-      newSteps[index] = { ...newSteps[index], status };
+      const newSteps = [...prevSteps].map((step, i) => {
+        if (i < index) {
+          return { ...step, status: ProcessingStepStatus.COMPLETED, info: undefined };
+        }
+        if (i === index) {
+          return { ...step, status, info: info || step.info };
+        }
+        return { ...step, status: ProcessingStepStatus.PENDING, info: undefined };
+      });
       return newSteps;
     });
   }, []);
   
   const handleFileUpload = async (files: File[]) => {
     if (view === 'processing') return;
+
+    // Clear previous context before starting a new analysis
+    clearContext();
 
     setError(null);
     setUploadInfo('Processando arquivos...');
@@ -48,27 +85,66 @@ function App() {
     setProcessedFiles([]);
     setPipelineSteps(INITIAL_PIPELINE_STEPS);
 
+    const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB per file
+    const validFiles: File[] = [];
+    let oversizedFiles: string[] = [];
+    const errorMessages: string[] = [];
+    
+    for (const file of files) {
+        if (file.size > MAX_FILE_SIZE) {
+            oversizedFiles.push(file.name);
+        } else {
+            validFiles.push(file);
+        }
+    }
+
+    if (oversizedFiles.length > 0) {
+        const oversizedMsg = `Os seguintes arquivos são muito grandes (limite de 10MB) e não serão processados: ${oversizedFiles.join(', ')}`;
+        errorMessages.push(oversizedMsg);
+        logError({
+            source: 'FileUpload',
+            message: `Arquivos excedem o limite de 10MB: ${oversizedFiles.join(', ')}`,
+            severity: 'warning'
+        });
+    }
+
+    if (validFiles.length === 0) {
+        setError(errorMessages.length > 0 ? errorMessages.join('\n') : "Nenhum arquivo válido para processar. Verifique o tamanho dos arquivos.");
+        setView('upload');
+        return;
+    }
+
     let currentProcessedFiles: File[] = [];
-    let extractedCount = 0;
 
     try {
       setUploadInfo('Preparando arquivos para análise...');
-      const fileProcessingPromises = files.map(async (file) => {
+      const fileProcessingPromises = validFiles.map(async (file) => {
         if (file.name.toLowerCase().endsWith('.zip')) {
-          const zip = await JSZip.loadAsync(file);
-          const extractedFilePromises: Promise<File>[] = [];
-          
-          zip.forEach((_, zipEntry) => {
-            if (!zipEntry.dir) {
-              const promise = zipEntry.async('blob').then(blob => {
-                extractedCount++;
-                return new File([blob], zipEntry.name, { type: blob.type });
-              });
-              extractedFilePromises.push(promise);
-            }
-          });
-          
-          return Promise.all(extractedFilePromises);
+          try {
+            const zip = await JSZip.loadAsync(file);
+            const extractedFilePromises: Promise<File | null>[] = [];
+            
+            zip.forEach((_, zipEntry) => {
+              if (!zipEntry.dir) {
+                const promise = zipEntry.async('blob').then(blob => {
+                  const extractedFile = new File([blob], zipEntry.name, { type: blob.type });
+                  if (extractedFile.size > MAX_FILE_SIZE) {
+                      oversizedFiles.push(`(do zip) ${extractedFile.name}`);
+                      return null;
+                  }
+                  return extractedFile;
+                });
+                extractedFilePromises.push(promise);
+              }
+            });
+            
+            const extractedFiles = await Promise.all(extractedFilePromises);
+            return extractedFiles.filter((f): f is File => f !== null);
+
+          } catch (zipError) {
+              console.error(`Error unzipping ${file.name}:`, zipError);
+              throw new Error(`Falha ao descompactar o arquivo '${file.name}'. O arquivo pode estar corrompido ou em um formato de zip não suportado.`);
+          }
         } else {
           return Promise.resolve([file]);
         }
@@ -77,28 +153,46 @@ function App() {
       const nestedFilesArray = await Promise.all(fileProcessingPromises);
       currentProcessedFiles = nestedFilesArray.flat();
       setProcessedFiles(currentProcessedFiles);
-      
+       
+      if (oversizedFiles.length > 0) {
+          const oversizedMsg = `Arquivos grandes (limite de 10MB) ignorados: ${oversizedFiles.join(', ')}`;
+          setError(oversizedMsg);
+          logError({
+            source: 'FileUpload',
+            message: `Arquivos extraídos excedem o limite de 10MB: ${oversizedFiles.join(', ')}`,
+            severity: 'warning'
+        });
+      }
+
       if (currentProcessedFiles.length === 0) {
-        throw new Error('Nenhum arquivo válido encontrado para análise. O arquivo .zip pode estar vazio ou conter apenas pastas.');
+        let finalError = 'Nenhum arquivo válido encontrado para análise.';
+        if(oversizedFiles.length > 0) {
+            finalError += ` ${oversizedFiles.length} arquivo(s) foram ignorados por excederem o limite de tamanho.`
+        } else if (files.some(f => f.name.toLowerCase().endsWith('.zip'))) {
+            finalError += ' O arquivo .zip pode estar vazio ou conter apenas pastas.'
+        }
+        throw new Error(finalError);
       }
       
-      if (extractedCount > 0) {
-        setUploadInfo(`${extractedCount} arquivo${extractedCount > 1 ? 's' : ''} extraído${extractedCount > 1 ? 's' : ''} de arquivos .zip. Analisando ${currentProcessedFiles.length} arquivo${currentProcessedFiles.length > 1 ? 's' : ''} no total.`);
-      } else {
-        setUploadInfo(`Analisando ${currentProcessedFiles.length} arquivo${currentProcessedFiles.length > 1 ? 's' : ''}...`);
-      }
+      setUploadInfo(`Analisando ${currentProcessedFiles.length} arquivo(s)...`);
       
-      const report = await generateReportFromFiles(currentProcessedFiles, (stepIndex) => {
-        updatePipelineStep(stepIndex, ProcessingStepStatus.IN_PROGRESS);
-      });
+      const executiveSummary = await generateReportFromFiles(currentProcessedFiles, updatePipelineStep, logError);
       
-      updatePipelineStep(INITIAL_PIPELINE_STEPS.length - 1, ProcessingStepStatus.COMPLETED);
-      setGeneratedReport(report);
+      // Store the successful analysis in cognitive memory
+      storeLastReportSummary(executiveSummary);
+
+      const initialReport: GeneratedReport = {
+          executiveSummary,
+          fullTextAnalysis: undefined,
+      };
+
+      updatePipelineStep(INITIAL_PIPELINE_STEPS.length - 1, ProcessingStepStatus.COMPLETED, "Análise executiva finalizada com sucesso!");
+      setGeneratedReport(initialReport);
       setView('dashboard');
 
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'An unknown error occurred.';
-      setError(errorMessage);
+      setError(prev => prev ? `${prev}\n${errorMessage}` : errorMessage);
       logError({
           source: 'FileUpload',
           message: errorMessage,
@@ -109,7 +203,7 @@ function App() {
       if (currentStepIndex !== -1) {
         updatePipelineStep(currentStepIndex, ProcessingStepStatus.FAILED);
       } else {
-        setPipelineSteps(prev => prev.map(step => ({ ...step, status: ProcessingStepStatus.FAILED })));
+        updatePipelineStep(0, ProcessingStepStatus.FAILED);
       }
       setTimeout(() => setView('upload'), 3000);
       console.error("Failed to process files or generate report:", err);
@@ -117,6 +211,7 @@ function App() {
   };
 
   const handleAnalyzeOtherFiles = () => {
+    clearContext();
     setView('upload');
     setGeneratedReport(null);
     setError(null);
@@ -137,15 +232,20 @@ function App() {
       case 'processing':
          return (
           <div className={commonWrapperClasses}>
-            <PipelineTracker steps={pipelineSteps} info={uploadInfo} />
-            {error && <p className="text-red-400 mt-4 text-center">{error}</p>}
+            <PipelineTracker steps={pipelineSteps} />
+            {error && <p className="text-red-400 mt-4 text-center max-w-2xl whitespace-pre-wrap bg-red-500/10 p-3 rounded-lg">{error}</p>}
           </div>
         );
       case 'dashboard':
         if (generatedReport) {
-          return <Dashboard report={generatedReport} processedFiles={processedFiles} onAnalyzeOther={handleAnalyzeOtherFiles} />;
+          return <Dashboard initialReport={generatedReport} processedFiles={processedFiles} onAnalyzeOther={handleAnalyzeOtherFiles} logError={logError} />;
         }
-        return null;
+        // This case handles session resume where dashboard is the view but report is still loading from memory
+        return (
+             <div className={commonWrapperClasses}>
+                <p>Restaurando sessão...</p>
+             </div>
+        );
       default:
         return null;
     }
@@ -153,16 +253,21 @@ function App() {
   
   return (
     <div className="text-content-default min-h-screen font-sans">
-      <Header 
-        onLogoClick={handleAnalyzeOtherFiles}
-        theme={theme}
-        onToggleTheme={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
-        onOpenErrorLog={() => setIsErrorLogOpen(true)}
-      />
-      <main>
-        {renderContent()}
-      </main>
-      <ErrorLogModal isOpen={isErrorLogOpen} onClose={() => setIsErrorLogOpen(false)} />
+      <ApiKeyModal isOpen={isApiKeyModalOpen} onSave={handleSaveApiKey} />
+      {isAppReady && (
+        <>
+          <Header 
+            onLogoClick={handleAnalyzeOtherFiles}
+            theme={theme}
+            onToggleTheme={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
+            onOpenErrorLog={() => setIsErrorLogOpen(true)}
+          />
+          <main>
+            {renderContent()}
+          </main>
+          <ErrorLogModal isOpen={isErrorLogOpen} onClose={() => setIsErrorLogOpen(false)} />
+        </>
+      )}
     </div>
   );
 }

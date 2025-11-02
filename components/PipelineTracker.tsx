@@ -1,5 +1,3 @@
-
-
 import React from 'react';
 import { PipelineStep, ProcessingStepStatus } from '../types.ts';
 import { CheckCircleIcon } from './icons/CheckCircleIcon.tsx';
@@ -33,25 +31,30 @@ const StatusIcon: React.FC<{ status: ProcessingStepStatus }> = ({ status }) => {
 };
 
 export const PipelineTracker: React.FC<PipelineTrackerProps> = ({ steps, info }) => {
-  const currentStepInfo = steps.find(step => step.status === ProcessingStepStatus.IN_PROGRESS)?.name || "Preparando análise...";
+  const currentStep = steps.find(step => step.status === ProcessingStepStatus.IN_PROGRESS);
+  const isFailed = steps.some(step => step.status === ProcessingStepStatus.FAILED);
+
+  let currentStepInfo = "Preparando análise...";
+  if (isFailed) {
+      currentStepInfo = "Falha na análise. Redirecionando...";
+  } else if (info) {
+      currentStepInfo = info;
+  } else if (currentStep) {
+      currentStepInfo = `${currentStep.name}...`;
+  } else if (steps[steps.length - 1].status === ProcessingStepStatus.COMPLETED) {
+      currentStepInfo = "Análise concluída!";
+  }
   
   return (
-    <div className="w-full max-w-3xl bg-bg-secondary backdrop-blur-xl rounded-3xl border border-border-glass shadow-glass p-8">
+    <div className="w-full max-w-4xl bg-bg-secondary backdrop-blur-xl rounded-3xl border border-border-glass shadow-glass p-8">
       <h2 className="text-2xl font-semibold text-content-emphasis mb-8 text-center">Progresso da Análise</h2>
-
-      {info && (
-        <div className="w-full p-3 mb-6 bg-blue-500/20 border border-blue-500/50 rounded-xl text-center flex items-center justify-center gap-2">
-            <InfoIcon className="w-5 h-5 text-blue-300 flex-shrink-0" />
-            <p className="text-sm text-blue-200">{info}</p>
-        </div>
-      )}
 
       <div className="flex justify-between items-center">
         {steps.map((step, index) => (
           <React.Fragment key={index}>
-            <div className="flex flex-col items-center text-center">
+            <div className="flex flex-col items-center text-center w-32">
               <StatusIcon status={step.status} />
-              <p className={`mt-2 text-sm font-semibold ${step.status !== ProcessingStepStatus.PENDING ? 'text-content-emphasis' : 'text-content-default/50'}`}>
+              <p className={`mt-2 text-xs font-semibold ${step.status !== ProcessingStepStatus.PENDING ? 'text-content-emphasis' : 'text-content-default/50'}`}>
                 {step.name}
               </p>
             </div>
@@ -61,7 +64,11 @@ export const PipelineTracker: React.FC<PipelineTrackerProps> = ({ steps, info })
           </React.Fragment>
         ))}
       </div>
-       <p className="text-center text-content-default mt-8 animate-pulse">{currentStepInfo}...</p>
+      
+       <div className="w-full p-3 mt-8 bg-black/20 border border-border-glass rounded-xl text-center flex items-center justify-center gap-2">
+            <InfoIcon className="w-5 h-5 text-blue-300 flex-shrink-0" />
+            <p className="text-sm text-blue-200 font-medium animate-pulse">{currentStepInfo}</p>
+        </div>
     </div>
   );
 };

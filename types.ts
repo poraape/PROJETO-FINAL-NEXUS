@@ -9,6 +9,7 @@ export enum ProcessingStepStatus {
 export interface PipelineStep {
   name: string;
   status: ProcessingStepStatus;
+  info?: string;
 }
 
 export interface KeyMetrics {
@@ -44,7 +45,7 @@ export interface ExecutiveSummary {
 
 export interface GeneratedReport {
   executiveSummary: ExecutiveSummary;
-  fullTextAnalysis: string;
+  fullTextAnalysis?: string; // Made optional for on-demand loading
 }
 
 export enum TaxRegime {

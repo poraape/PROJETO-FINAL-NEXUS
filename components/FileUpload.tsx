@@ -49,15 +49,22 @@ export const FileUpload: React.FC<FileUploadProps> = ({ onFileUpload, error }) =
                 <UploadIcon className="w-12 h-12 text-accent" />
             </div>
             <h2 className="text-3xl font-bold text-content-emphasis mb-2">Arraste e Solte Seus Arquivos Fiscais</h2>
-            <p className="text-content-default mb-6">SPED, NF-e, XML, CSV, TXT, ou arquivos .ZIP contendo-os.</p>
+            <p className="text-content-default mb-6">SPED, NF-e, XML, CSV, JSON, PDF, DOCX, XLSX, imagens ou arquivos .ZIP.</p>
             <label htmlFor="file-upload" className="cursor-pointer bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-xl transition-colors">
                 Ou Selecione os Arquivos
             </label>
-            <input id="file-upload" type="file" multiple className="hidden" onChange={handleFileChange} accept=".xml,.csv,.txt,.zip" />
+            <input 
+              id="file-upload" 
+              type="file" 
+              multiple 
+              className="hidden" 
+              onChange={handleFileChange} 
+              accept=".xml,.csv,.txt,.zip,.json,.pdf,.doc,.docx,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.xls,.xlsx,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,image/png,image/jpeg,image/webp" 
+            />
         </div>
       </div>
       {error && (
-        <p className="mt-4 text-red-400 bg-red-500/10 p-3 rounded-lg">{error}</p>
+        <p className="mt-4 text-red-400 bg-red-500/10 p-3 rounded-lg whitespace-pre-wrap">{error}</p>
       )}
     </div>
   );

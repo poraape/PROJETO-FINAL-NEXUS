@@ -1,15 +1,17 @@
 import React, { useState } from 'react';
-import { GeneratedReport, SimulationParams, SimulationResult, TaxRegime } from '../../types.ts';
+import { GeneratedReport, SimulationParams, SimulationResult, TaxRegime, LogError } from '../../types.ts';
 import { simulateTaxScenario } from '../../services/geminiService.ts';
 import { CalculatorIcon } from '../icons/CalculatorIcon.tsx';
 import { FileExportIcon } from '../icons/FileExportIcon.tsx';
 import { ScenarioCard } from './ScenarioCard.tsx';
 import { BarChart, Card, Subtitle, Title } from '@tremor/react';
-import { useErrorLog } from '../../hooks/useErrorLog.ts';
+import { getCachedSimulation, storeSimulationResult } from '../../services/contextMemory.ts';
+import { calculateAllScenarios } from '../../services/taxCalculator.ts';
 
 interface TaxSimulatorProps {
   report: GeneratedReport;
   onSimulationComplete: (result: SimulationResult) => void;
+  logError: (error: Omit<LogError, 'timestamp'>) => void;
 }
 
 const ufs = ["AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", "MA", "MT", "MS", "MG", "PA", "PB", "PR", "PE", "PI", "RJ", "RN", "RS", "RO", "RR", "SC", "SP", "SE", "TO"];
@@ -19,32 +21,52 @@ const opTypes = ["Venda de Mercadoria", "Prestação de Serviço", "Venda Mista"
 const valueFormatter = (number: number) =>
   new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', notation: 'compact' }).format(number);
 
-export const TaxSimulator: React.FC<TaxSimulatorProps> = ({ report, onSimulationComplete }) => {
+export const TaxSimulator: React.FC<TaxSimulatorProps> = ({ report, onSimulationComplete, logError }) => {
   const [params, setParams] = useState<Omit<SimulationParams, 'valorBase'>>({
     regimeTributario: TaxRegime.LUCRO_PRESUMIDO,
     uf: 'SP',
     cnae: '47.81-4-00', // Exemplo
     tipoOperacao: opTypes[0],
   });
-  const [valorBase, setValorBase] = useState<string>(report.executiveSummary.keyMetrics.valorTotalDasNfes.toString());
+  const [valorBase, setValorBase] = useState<string>(report?.executiveSummary?.keyMetrics?.valorTotalDasNfes?.toString() || '100000');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<SimulationResult | null>(null);
-  const { logError } = useErrorLog();
 
   const handleSimulate = async () => {
     if (isLoading) return;
+    
+    const fullParams: SimulationParams = {
+      ...params,
+      valorBase: parseFloat(valorBase) || 0,
+    };
+
+    // Check cognitive memory first
+    const cachedResult = getCachedSimulation(fullParams);
+    if (cachedResult) {
+        setResult(cachedResult);
+        onSimulationComplete(cachedResult);
+        logError({ source: 'TaxSimulator', message: 'Resultado da simulação carregado do cache.', severity: 'info' });
+        return;
+    }
+
     setIsLoading(true);
     setError(null);
     setResult(null);
     
     try {
-      const simulationResult = await simulateTaxScenario({
-        ...params,
-        valorBase: parseFloat(valorBase)
-      }, report);
+      // Step 1: Perform local calculations
+      logError({ source: 'TaxSimulator', message: 'Realizando cálculos fiscais locais...', severity: 'info' });
+      const calculatedScenarios = calculateAllScenarios(fullParams, report.executiveSummary.keyMetrics);
+      
+      // Step 2: Send calculated data to AI for textual analysis
+      logError({ source: 'TaxSimulator', message: 'Enviando cálculos para a IA para análise textual.', severity: 'info' });
+      const simulationResult = await simulateTaxScenario(calculatedScenarios, logError);
+      
       setResult(simulationResult);
       onSimulationComplete(simulationResult);
+      // Step 3: Store the final combined result in cognitive memory
+      storeSimulationResult(fullParams, simulationResult);
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Ocorreu um erro desconhecido.';
       setError(errorMessage);

@@ -1,3 +1,4 @@
+
 // Fix: Implementing the ExecutiveAnalysis component to display report data.
 import React from 'react';
 import { ExecutiveSummary } from '../../types';
@@ -20,7 +21,7 @@ const formatCurrency = (value: number) => {
 
 export const ExecutiveAnalysis: React.FC<ExecutiveAnalysisProps> = ({ summary }) => {
   const insights = [
-    ...summary.actionableInsights,
+    ...(summary.actionableInsights || []),
     { text: "O 'Índice de Conformidade de ICMS' elevado sugere processos fiscais robustos, mas a monitoria contínua é crucial." },
     { text: "Um 'Nível de Risco Tributário' baixo é positivo, mas requer validação periódica das regras fiscais para se manter." },
   ];

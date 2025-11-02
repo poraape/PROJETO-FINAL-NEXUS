@@ -1,308 +1,469 @@
-import { GoogleGenAI } from "@google/genai";
+// Fix: Implementing the Gemini service to handle API calls for report generation and analysis.
+import { GoogleGenAI, Part, GenerateContentResponse } from '@google/genai';
 import {
-  GeneratedReport,
+  ExecutiveSummary,
+  ProcessingStepStatus,
   SimulationParams,
   SimulationResult,
   ComparativeAnalysisReport,
-} from '../types.ts';
+  LogError,
+  GeneratedReport,
+  TaxScenario,
+} from '../types';
+import { parseFile } from './fileParsers.ts';
+import { getApiKey } from '../config.ts';
 
-// Fix: Initialize the GoogleGenAI client.
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY! });
+const CHUNK_TOKEN_THRESHOLD = 8000; // ≈ 32,000 characters
 
-/**
- * Parses a JSON object from a string, which may be wrapped in a markdown code block.
- * Includes fallbacks for common formatting issues.
- * @param jsonString The string to parse.
- * @returns The parsed object or null if parsing fails.
- */
-const parseJsonFromMarkdown = <T>(jsonString: string): T | null => {
-    try {
-        const match = jsonString.match(/```json\n([\s\S]*?)\n```/);
-        if (match && match[1]) {
-            return JSON.parse(match[1]) as T;
-        }
-        // Fallback for cases where the JSON is not in a markdown block
-        return JSON.parse(jsonString) as T;
-    } catch (error) {
-        console.error("Failed to parse JSON from response:", error);
-        console.error("Original string:", jsonString);
-        // Attempt to fix common JSON errors, like trailing commas
+const getAiInstance = () => {
+  const apiKey = getApiKey();
+  if (!apiKey) {
+    throw new Error("Chave da API Gemini não encontrada. Por favor, configure-a no início.");
+  }
+  return new GoogleGenAI({ apiKey });
+};
+
+// --- Helper Functions ---
+
+const estimateTokens = (text: string): number => {
+    return Math.ceil(text.length / 4);
+};
+
+const callGeminiWithRetry = async (
+    promptParts: (string | Part)[], 
+    logError: (error: Omit<LogError, 'timestamp'>) => void,
+    isJsonMode: boolean = true
+): Promise<GenerateContentResponse> => {
+    const ai = getAiInstance();
+    const model = 'gemini-2.5-flash';
+    const MAX_RETRIES = 3;
+    let lastError: any = null;
+
+    let mutableParts: Part[] = promptParts.map(part =>
+        typeof part === 'string' ? { text: part } : part
+    );
+
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         try {
-            const sanitizedString = jsonString
-                .replace(/,\s*([}\]])/g, '$1') // remove trailing commas
-                .match(/\{[\s\S]*\}/)?.[0]; // extract the main object
-            if(sanitizedString) {
-                return JSON.parse(sanitizedString) as T;
+            console.log(`DEBUG: Chamada da API Gemini (tentativa ${attempt}/${MAX_RETRIES}). Tamanho do payload: ${JSON.stringify(mutableParts).length} caracteres.`);
+            
+            const response = await ai.models.generateContent({
+                model,
+                contents: { parts: mutableParts },
+                config: isJsonMode ? { responseMimeType: 'application/json' } : {}
+            });
+            
+            if (!response.text) {
+                 const blockReason = response.promptFeedback?.blockReason;
+                 const finishReason = response.candidates?.[0]?.finishReason;
+                 throw new Error(`A resposta da IA estava vazia. Motivo do bloqueio: ${blockReason || 'N/A'}. Motivo da finalização: ${finishReason || 'N/A'}.`);
             }
-        } catch (e) {
-             console.error("Failed to parse sanitized JSON:", e);
+            return response;
+        } catch (error: any) {
+            lastError = error;
+            const errorMessage = error.toString().toLowerCase();
+            const isRetriableError = errorMessage.includes('500') || errorMessage.includes('internal error') || errorMessage.includes('429');
+            
+            if (isRetriableError && attempt < MAX_RETRIES) {
+                const waitTime = (2 ** (attempt - 1)) * 2000; // 2s, 4s
+                logError({
+                    source: 'geminiService',
+                    message: `Falha na chamada da API Gemini (tentativa ${attempt}/${MAX_RETRIES}). Reduzindo payload e tentando novamente em ${waitTime / 1000}s...`,
+                    severity: 'warning',
+                    details: { error: error.message },
+                });
+
+                mutableParts = mutableParts.map(part => 
+                    'text' in part && part.text
+                        ? { ...part, text: part.text.substring(0, Math.ceil(part.text.length / 2)) } 
+                        : part
+                );
+
+                await new Promise(res => setTimeout(res, waitTime));
+            } else {
+                 try {
+                    localStorage.setItem('lastFailedGeminiPayload', JSON.stringify({ parts: mutableParts }));
+                 } catch (e) { /* ignore storage errors */ }
+                 throw new Error(`Falha na API Gemini após ${attempt} tentativas. O último payload que causou o erro foi salvo no localStorage. Erro: ${error.message}`);
+            }
         }
-        return null;
+    }
+    throw lastError;
+};
+
+const parseGeminiJsonResponse = <T>(text: string, logError: (error: Omit<LogError, 'timestamp'>) => void): T => {
+    try {
+        return JSON.parse(text) as T;
+    } catch (e) {
+        logError({
+            source: 'geminiService.jsonParser',
+            message: 'Falha ao analisar a resposta JSON da Gemini.',
+            severity: 'critical',
+            details: { error: e, responseText: text },
+        });
+        throw new Error("A resposta da IA não está em um formato JSON válido.");
     }
 };
 
+const getFileContentForAnalysis = async (
+    files: File[],
+    updatePipelineStep: (index: number, status: ProcessingStepStatus, info?: string) => void,
+    logError: (error: Omit<LogError, 'timestamp'>) => void
+): Promise<{fileName: string, content: string}[]> => {
+    const parsedFileContents: {fileName: string, content: string}[] = [];
+    for (const file of files) {
+        try {
+            updatePipelineStep(0, ProcessingStepStatus.IN_PROGRESS, `Lendo e extraindo dados de: ${file.name}`);
+            const result = await parseFile(file, (progressInfo) => {
+                 updatePipelineStep(0, ProcessingStepStatus.IN_PROGRESS, `${file.name}: ${progressInfo}`);
+            });
+            if (result.type === 'text') {
+                parsedFileContents.push({fileName: file.name, content: result.content});
+            }
+        } catch (e) {
+            logError({
+                source: 'fileParser',
+                message: `Falha ao processar o arquivo ${file.name}`,
+                severity: 'warning',
+                details: e,
+            });
+        }
+    }
+    return parsedFileContents;
+}
+
+
+// --- Exported Service Functions ---
+
 /**
- * Generates a comprehensive fiscal and accounting report from a set of files.
- * @param files The files to analyze.
- * @param onProgressUpdate A callback to report progress through the pipeline.
- * @returns A promise that resolves to the generated report.
+ * Layer 1: Executive Analysis.
+ * Generates a high-level summary from files. Fast and token-efficient.
  */
 export const generateReportFromFiles = async (
   files: File[],
-  onProgressUpdate: (stepIndex: number) => void
-): Promise<GeneratedReport> => {
-  onProgressUpdate(0); // 1. Extração e Leitura
+  updatePipelineStep: (index: number, status: ProcessingStepStatus, info?: string) => void,
+  logError: (error: Omit<LogError, 'timestamp'>) => void
+): Promise<ExecutiveSummary> => {
+    const startTime = performance.now();
+    updatePipelineStep(0, ProcessingStepStatus.IN_PROGRESS, `Processando ${files.length} arquivo(s)...`);
+    const fileContents = await getFileContentForAnalysis(files, updatePipelineStep, logError);
+    const combinedContent = fileContents.map(f => `--- INÍCIO DO ARQUIVO: ${f.fileName} ---\n${f.content}\n--- FIM DO ARQUIVO: ${f.fileName} ---`).join('\n\n');
+    updatePipelineStep(0, ProcessingStepStatus.COMPLETED);
 
-  const fileContents = await Promise.all(
-    files.map(async (file) => {
-      if (file.type.startsWith('text/') || file.type.includes('xml') || file.name.toLowerCase().endsWith('.csv')) {
-        const content = await file.text();
-        return `
-        --- INÍCIO DO ARQUIVO: ${file.name} ---
-        ${content.substring(0, 5000)}... (conteúdo truncado para análise)
-        --- FIM DO ARQUIVO: ${file.name} ---
-        `;
-      }
-      return `--- ARQUIVO (não textual): ${file.name} ---`;
-    })
-  );
+    // Simulate intermediate steps
+    updatePipelineStep(1, ProcessingStepStatus.IN_PROGRESS, "Agente Auditor: Verificando consistência...");
+    await new Promise(res => setTimeout(res, 300));
+    updatePipelineStep(1, ProcessingStepStatus.COMPLETED);
+    updatePipelineStep(2, ProcessingStepStatus.IN_PROGRESS, "Agente Classificador: Organizando informações...");
+    await new Promise(res => setTimeout(res, 300));
+    updatePipelineStep(2, ProcessingStepStatus.COMPLETED);
+    
+    updatePipelineStep(3, ProcessingStepStatus.IN_PROGRESS, "Agente de Inteligência: Gerando análise executiva...");
+    
+    const totalTokens = estimateTokens(combinedContent);
+    logError({ source: 'geminiService.executive', message: `Iniciando análise executiva. Payload: ${combinedContent.length} chars, Tokens estimados: ${totalTokens}`, severity: 'info' });
 
-  onProgressUpdate(1); // 2. Ag. Auditor
-  await new Promise(res => setTimeout(res, 500)); // Simulate work
-  onProgressUpdate(2); // 3. Ag. Classificador
-  await new Promise(res => setTimeout(res, 500)); // Simulate work
-  onProgressUpdate(3); // 4. Ag. Inteligência
-  
-  const prompt = `
-    # Análise Fiscal e Contábil Abrangente
+    const prompt = `
+      Você é um especialista em contabilidade e análise fiscal no Brasil. Analise o conteúdo dos seguintes arquivos fiscais e gere UM RESUMO EXECUTIVO.
+      O conteúdo fornecido é uma concatenação de vários arquivos ou resumos de arquivos. Cada um é delimitado por marcadores "--- INÍCIO/FIM DO ARQUIVO ---".
 
-    ## Contexto
-    Você é o "Nexus QuantumI2A2", um sistema de IA especialista em análise fiscal e contábil para empresas brasileiras. Você recebeu ${files.length} arquivos para análise. Os nomes dos arquivos são: ${files.map(f => f.name).join(', ')}.
+      Sua tarefa é gerar APENAS um objeto JSON para a chave "executiveSummary" com a seguinte estrutura (use os tipos de dados exatos):
+      - title (string): Um título conciso para o relatório. Ex: "Análise Fiscal Consolidada".
+      - description (string): Uma breve descrição do período ou dos documentos analisados.
+      - keyMetrics (object): Um objeto com as seguintes métricas calculadas a partir de TODOS os arquivos:
+        - numeroDeDocumentosValidos (number): Conte o número de documentos distintos e válidos.
+        - valorTotalDasNfes (number): Some o valor total de todas as NF-es encontradas.
+        - valorTotalDosProdutos (number): Some o valor total dos produtos.
+        - indiceDeConformidadeICMS (string): Uma porcentagem estimada da conformidade de ICMS (ex: "98.7%").
+        - nivelDeRiscoTributario ('Baixo' | 'Média' | 'Alto'): Avalie o risco geral.
+        - estimativaDeNVA (number): "Necessidade de Verba de Anulação". Calcule se possível, senão, 0.
+        - valorTotalDeICMS (number): Some todo o ICMS.
+        - valorTotalDePIS (number): Some todo o PIS.
+        - valorTotalDeCOFINS (number): Some todo o COFINS.
+        - valorTotalDeISS (number): Some todo o ISS.
+      - actionableInsights (array of objects): Uma lista de 2-4 insights importantes, cada um sendo um objeto com "text" (string).
+      - csvInsights (array of objects, opcional): Se houver resumos de CSV, gere um insight para cada. Cada objeto deve ter: fileName (string), insight (string), rowCount (number).
 
-    ## Tarefa
-    Sua tarefa é realizar uma análise completa dos arquivos fornecidos e gerar um relatório estruturado em formato JSON. O relatório deve ser dividido em duas partes principais: "executiveSummary" e "fullTextAnalysis".
+      Responda APENAS com o objeto JSON, sem markdown ou texto explicativo.
+    `;
+    const promptParts = [{text: prompt}, {text: `\n\nCONTEÚDO DOS ARQUIVOS:\n${combinedContent}`}];
 
-    ### 1. Resumo Executivo (executiveSummary)
-    Esta seção deve conter uma visão geral concisa e acionável. Crie um objeto JSON com a seguinte estrutura:
-
-    - **title**: "Relatório de Análise Fiscal e Contábil"
-    - **description**: Um resumo de 1-2 frases sobre os arquivos analisados.
-    - **keyMetrics**: Um objeto com as seguintes métricas-chave, extraídas e calculadas a partir dos documentos. Se um valor não puder ser determinado, use 0 ou uma estimativa razoável.
-        - **numeroDeDocumentosValidos**: (Integer) Contagem total de documentos fiscais válidos encontrados.
-        - **valorTotalDasNfes**: (Float) Soma total dos valores de todas as Notas Fiscais Eletrônicas (NF-e).
-        - **valorTotalDosProdutos**: (Float) Soma total do valor dos produtos/serviços.
-        - **indiceDeConformidadeICMS**: (String, e.g., "98.7%") Estimativa da porcentagem de transações em conformidade com as regras de ICMS.
-        - **nivelDeRiscoTributario**: (Enum: "Baixo", "Médio", "Alto") Avaliação geral do risco fiscal com base nas anomalias encontradas.
-        - **estimativaDeNVA**: (Float) Estimativa da "Necessidade de Verba de Antecipação" (NVA), se aplicável.
-        - **valorTotalDeICMS**: (Float) Soma total de ICMS.
-        - **valorTotalDePIS**: (Float) Soma total de PIS.
-        - **valorTotalDeCOFINS**: (Float) Soma total de COFINS.
-        - **valorTotalDeISS**: (Float) Soma total de ISS.
-    - **actionableInsights**: Uma array de objetos, cada um com uma chave "text" (String). Forneça 2-3 insights práticos e acionáveis baseados na análise.
-    - **csvInsights**: Se houver arquivos CSV, forneça uma análise resumida para cada um. É uma array de objetos com a seguinte estrutura:
-        - **fileName**: (String) O nome do arquivo CSV.
-        - **insight**: (String) Um resumo de uma frase sobre o conteúdo do arquivo CSV.
-        - **rowCount**: (Integer) O número de linhas no arquivo.
-
-    ### 2. Análise Textual Completa (fullTextAnalysis)
-    Esta seção deve ser uma string de texto corrido (não JSON) com uma análise detalhada. Organize o texto com títulos e parágrafos. Cubra os seguintes pontos:
-    - **Visão Geral dos Documentos**: Descreva os tipos de documentos encontrados e o período que cobrem.
-    - **Análise de Conformidade**: Detalhe os pontos de conformidade e não conformidade encontrados (ICMS, PIS/COFINS, etc.).
-    - **Identificação de Riscos**: Elabore sobre os riscos fiscais identificados e suas possíveis consequências.
-    - **Oportunidades de Otimização**: Sugira áreas onde a empresa pode otimizar sua carga tributária ou melhorar seus processos fiscais.
-    - **Conclusão**: Um parágrafo final resumindo os achados.
-
-    ## Conteúdo dos Arquivos
-    ${fileContents.join('\n')}
-
-    ## Formato de Saída
-    Responda APENAS com o objeto JSON contendo 'executiveSummary' e 'fullTextAnalysis'. O JSON deve estar dentro de um bloco de código markdown (\`\`\`json ... \`\`\`).
-    Não adicione nenhum texto ou explicação antes ou depois do bloco de código JSON.
-  `;
-  
-  const model = "gemini-2.5-flash";
-  
-  const response = await ai.models.generateContent({
-    model,
-    contents: [{ parts: [{ text: prompt }] }],
-  });
-
-  onProgressUpdate(4); // 5. Ag. Contador
-
-  const reportText = response.text;
-  const parsedReport = parseJsonFromMarkdown<GeneratedReport>(reportText);
-  
-  if (!parsedReport || !parsedReport.executiveSummary || !parsedReport.fullTextAnalysis) {
-      console.error("Failed to parse report from Gemini response:", reportText);
-      throw new Error("Não foi possível gerar o relatório. A resposta da IA está em um formato inesperado. Verifique os logs para mais detalhes.");
-  }
-  
-  return parsedReport;
+    try {
+        const response = await callGeminiWithRetry(promptParts, logError, true);
+        const report = parseGeminiJsonResponse<{ executiveSummary: ExecutiveSummary }>(response.text, logError);
+        
+        if (!report || !report.executiveSummary) {
+            throw new Error("A estrutura do resumo executivo da IA é inválida.");
+        }
+        
+        updatePipelineStep(3, ProcessingStepStatus.COMPLETED);
+        updatePipelineStep(4, ProcessingStepStatus.IN_PROGRESS, "Agente Contador: Finalizando resumo...");
+        await new Promise(res => setTimeout(res, 300));
+        
+        const endTime = performance.now();
+        logError({ source: 'geminiService.executive', message: `Análise executiva concluída em ${(endTime - startTime).toFixed(2)} ms.`, severity: 'info' });
+        
+        return report.executiveSummary;
+    } catch(err) {
+        logError({
+            source: 'geminiService.generateReport',
+            message: 'Falha ao gerar resumo executivo com a IA.',
+            severity: 'critical',
+            details: err,
+        });
+        throw err;
+    }
 };
 
 /**
- * Simulates tax scenarios based on user parameters and a baseline report.
- * @param params The simulation parameters.
- * @param report The baseline generated report.
- * @returns A promise that resolves to the simulation result.
+ * Layer 4: Full Text Analysis.
+ * Generates a detailed text analysis on-demand. Can be token-intensive.
+ */
+export const generateFullTextAnalysis = async (
+    files: File[],
+    logError: (error: Omit<LogError, 'timestamp'>) => void,
+    onProgress: (message: string) => void
+): Promise<string> => {
+     const startTime = performance.now();
+     onProgress('Extraindo conteúdo dos arquivos...');
+     const fileContents = await getFileContentForAnalysis(files, () => {}, logError);
+     const combinedContent = fileContents.map(f => f.content).join('\n\n');
+     const totalTokens = estimateTokens(combinedContent);
+
+     logError({ source: 'geminiService.fullText', message: `Iniciando análise completa. ${fileContents.length} arquivos, ${totalTokens} tokens estimados.`, severity: 'info' });
+
+     try {
+        // Chunking Strategy
+        if (totalTokens > CHUNK_TOKEN_THRESHOLD) {
+            onProgress(`Payload grande detectado. Analisando ${fileContents.length} arquivos individualmente...`);
+            const individualAnalyses: string[] = [];
+            for (let i = 0; i < fileContents.length; i++) {
+                const file = fileContents[i];
+                onProgress(`Analisando arquivo ${i + 1}/${fileContents.length}: ${file.fileName}`);
+                const chunkPrompt = `Você é um analista fiscal. Forneça uma análise textual detalhada, em markdown, do seguinte documento fiscal:\n\n${file.content}`;
+                const response = await callGeminiWithRetry([chunkPrompt], logError, false);
+                individualAnalyses.push(`--- ANÁLISE DO ARQUIVO: ${file.fileName} ---\n${response.text}`);
+            }
+
+            onProgress('Sintetizando o relatório final...');
+            const synthesisPrompt = `Você é um editor sênior. Combine as seguintes análises individuais em um único relatório textual coeso e bem-estruturado em markdown. Remova redundâncias e crie uma narrativa fluida.\n\n${individualAnalyses.join('\n\n')}`;
+            const finalResponse = await callGeminiWithRetry([synthesisPrompt], logError, false);
+            const endTime = performance.now();
+            logError({ source: 'geminiService.fullText', message: `Análise completa (em lotes) concluída em ${(endTime - startTime).toFixed(2)} ms.`, severity: 'info' });
+            return finalResponse.text;
+        } else {
+            const prompt = `
+                Você é um especialista em contabilidade e análise fiscal no Brasil. Com base no conteúdo dos arquivos fiscais fornecidos, gere uma ANÁLISE TEXTUAL COMPLETA e detalhada.
+                Use markdown para formatação (títulos, listas, negrito).
+                Estruture sua análise em seções claras, como "Visão Geral", "Pontos de Atenção", "Análise de Impostos (ICMS, PIS/COFINS)", "Recomendações", etc.
+                Seja o mais detalhista possível.
+
+                CONTEÚDO DOS ARQUIVOS:
+                ${combinedContent}
+            `;
+            const response = await callGeminiWithRetry([prompt], logError, false);
+            const endTime = performance.now();
+            logError({ source: 'geminiService.fullText', message: `Análise completa (unificada) concluída em ${(endTime - startTime).toFixed(2)} ms.`, severity: 'info' });
+            return response.text;
+        }
+     } catch(err) {
+        logError({
+            source: 'geminiService.fullText',
+            message: 'Falha ao gerar análise textual completa com a IA.',
+            severity: 'critical',
+            details: err,
+        });
+        throw err;
+     }
+}
+
+
+/**
+ * Layer 2: Tax Simulation (Optimized).
+ * The AI is now used only for textual interpretation of pre-calculated scenarios.
  */
 export const simulateTaxScenario = async (
-    params: SimulationParams,
-    report: GeneratedReport
+    calculatedScenarios: TaxScenario[],
+    logError: (error: Omit<LogError, 'timestamp'>) => void
 ): Promise<SimulationResult> => {
-    
+    const startTime = performance.now();
+    logError({ source: 'geminiService.simulate', message: 'Iniciando interpretação de cenários tributários...', severity: 'info' });
+
+    // Remove textual recommendations from the payload sent to the AI to avoid influencing it
+    const scenariosForAI = calculatedScenarios.map(({ recomendacoes, ...scenario }) => scenario);
+
     const prompt = `
-    # Simulação de Cenário Tributário
+        Você é um consultor fiscal sênior. Com base nos CÁLCULOS de cenários tributários fornecidos abaixo, sua tarefa é gerar APENAS a parte textual da análise: um resumo executivo, a recomendação principal e recomendações específicas para cada cenário.
 
-    ## Contexto
-    Você é um especialista em planejamento tributário no Brasil. Um cliente forneceu dados de um relatório fiscal e parâmetros para uma simulação. Seu trabalho é analisar os dados e gerar 3 cenários tributários, comparando-os e fornecendo uma recomendação.
+        DADOS CALCULADOS (NÃO ALTERAR):
+        ${JSON.stringify(scenariosForAI, null, 2)}
 
-    ## Dados do Relatório de Análise (Contexto Base)
-    - **Valor Base para Simulação (Faturamento/Receita Bruta):** ${params.valorBase}
-    - **Métricas Chave do Período Anterior:** ${JSON.stringify(report.executiveSummary.keyMetrics)}
+        Sua tarefa é gerar uma resposta JSON com a seguinte estrutura:
+        - resumoExecutivo (string): Um parágrafo conciso (2-3 sentenças) resumindo os resultados e a principal diferença entre os cenários.
+        - recomendacaoPrincipal (string): O nome do cenário mais vantajoso (ex: "Lucro Presumido").
+        - recomendacoesPorCenario (object): Um objeto onde cada chave é o nome de um cenário (ex: "Lucro Presumido") e o valor é um array de 1-2 strings com recomendações textuais específicas para aquele regime.
 
-    ## Parâmetros da Simulação
-    - **Regime Tributário de Referência:** ${params.regimeTributario}
-    - **UF de Operação:** ${params.uf}
-    - **CNAE Principal:** ${params.cnae}
-    - **Tipo de Operação:** ${params.tipoOperacao}
-
-    ## Tarefa
-    Gere uma simulação tributária em formato JSON. A resposta DEVE seguir estritamente a estrutura abaixo.
-    Crie três cenários:
-    1.  O cenário baseado nos parâmetros fornecidos (${params.regimeTributario}).
-    2.  Um cenário alternativo (ex: se o regime for Lucro Presumido, crie um para Lucro Real ou Simples Nacional).
-    3.  Um terceiro cenário, otimizado ou com alguma variação (ex: em outra UF, ou com benefício fiscal).
-
-    ## Estrutura JSON de Saída
-    Responda APENAS com o objeto JSON abaixo, dentro de um bloco de código markdown (\`\`\`json ... \`\`\`).
-
-    {
-      "resumoExecutivo": "(String) Um resumo de 2-3 frases explicando os resultados da simulação e a principal conclusão.",
-      "recomendacaoPrincipal": "(String) O nome do cenário recomendado (deve corresponder a um dos 'nome' nos cenários abaixo).",
-      "cenarios": [
-        {
-          "nome": "(String) Nome do cenário (ex: 'Lucro Presumido - SP')",
-          "parametros": {
-            "regime": "(String) Regime tributário do cenário",
-            "uf": "(String) UF do cenário"
-          },
-          "cargaTributariaTotal": "(Float) Valor total de impostos a pagar neste cenário.",
-          "aliquotaEfetiva": "(String, e.g., '14.53%') A alíquota efetiva (Carga Total / Valor Base).",
-          "impostos": {
-            "IRPJ": "(Float) Valor estimado.",
-            "CSLL": "(Float) Valor estimado.",
-            "PIS": "(Float) Valor estimado.",
-            "COFINS": "(Float) Valor estimado.",
-            "ICMS": "(Float) Valor estimado.",
-            "ISS": "(Float) Valor estimado.",
-            "CPP (INSS)": "(Float) Valor estimado da Contribuição Previdenciária Patronal.",
-            "IPI": "(Float, opcional) Valor estimado se aplicável."
-          },
-          "recomendacoes": [
-            "(String) Uma recomendação específica para este cenário.",
-            "(String) Outra recomendação."
-          ]
-        }
-      ]
-    }
+        Seja analítico e direto. Responda APENAS com o objeto JSON.
     `;
+    const promptParts = [{ text: prompt }];
+    
+    try {
+        const response = await callGeminiWithRetry(promptParts, logError, true);
+        const textualAnalysis = parseGeminiJsonResponse<{
+            resumoExecutivo: string;
+            recomendacaoPrincipal: string;
+            recomendacoesPorCenario: { [key: string]: string[] };
+        }>(response.text, logError);
 
-    const model = 'gemini-2.5-flash';
-    const response = await ai.models.generateContent({
-        model,
-        contents: [{ parts: [{ text: prompt }] }],
-    });
+        if (!textualAnalysis || !textualAnalysis.recomendacoesPorCenario) {
+            throw new Error("A estrutura da análise textual da simulação da IA é inválida.");
+        }
 
-    const resultText = response.text;
-    const parsedResult = parseJsonFromMarkdown<SimulationResult>(resultText);
+        // Merge AI textual insights with the original calculated numbers
+        const finalScenarios = calculatedScenarios.map(scenario => ({
+            ...scenario,
+            recomendacoes: textualAnalysis.recomendacoesPorCenario[scenario.nome] || [],
+        }));
+        
+        const finalResult: SimulationResult = {
+            resumoExecutivo: textualAnalysis.resumoExecutivo,
+            recomendacaoPrincipal: textualAnalysis.recomendacaoPrincipal,
+            cenarios: finalScenarios
+        };
 
-    if (!parsedResult || !parsedResult.cenarios || parsedResult.cenarios.length === 0) {
-        console.error("Failed to parse simulation result from Gemini response:", resultText);
-        throw new Error("Não foi possível gerar a simulação. A resposta da IA está em um formato inesperado.");
+        const endTime = performance.now();
+        logError({ source: 'geminiService.simulate', message: `Simulação (interpretação da IA) concluída em ${(endTime - startTime).toFixed(2)} ms.`, severity: 'info' });
+        return finalResult;
+    } catch(err) {
+        logError({
+            source: 'geminiService.simulateTax',
+            message: 'Falha ao interpretar cenário com a IA.',
+            severity: 'critical',
+            details: err,
+        });
+        throw err;
     }
-
-    return parsedResult;
 };
 
 /**
- * Generates a comparative analysis between multiple files.
- * @param files The files to compare.
- * @returns A promise that resolves to the comparative analysis report.
+ * Layer 3: Comparative Analysis.
  */
-export const generateComparativeAnalysis = async (files: File[]): Promise<ComparativeAnalysisReport> => {
-    if (files.length < 2) {
-        throw new Error("A análise comparativa requer pelo menos 2 arquivos.");
-    }
-    const fileContents = await Promise.all(
-        files.map(async (file) => {
-          if (file.type.startsWith('text/') || file.type.includes('xml') || file.name.toLowerCase().endsWith('.csv')) {
-            const content = await file.text();
-            return `
-            --- INÍCIO DO ARQUIVO: ${file.name} ---
-            ${content.substring(0, 5000)}... (conteúdo truncado)
-            --- FIM DO ARQUIVO: ${file.name} ---
+export const generateComparativeAnalysis = async (
+    files: File[],
+    logError: (error: Omit<LogError, 'timestamp'>) => void,
+    onProgress: (message: string) => void
+): Promise<ComparativeAnalysisReport> => {
+    const startTime = performance.now();
+    onProgress('Extraindo conteúdo para comparação...');
+    const fileContents = await getFileContentForAnalysis(files, () => {}, logError);
+    const combinedContent = fileContents.map(f => f.content).join('\n\n');
+    const totalTokens = estimateTokens(combinedContent);
+
+    logError({ source: 'geminiService.compare', message: `Iniciando análise comparativa. ${fileContents.length} arquivos, ${totalTokens} tokens estimados.`, severity: 'info' });
+    
+    try {
+        let analysisResult: ComparativeAnalysisReport;
+
+        // Chunking strategy for comparison is tricky, but we can analyze individually and synthesize.
+        if (totalTokens > CHUNK_TOKEN_THRESHOLD) {
+             onProgress(`Payload grande detectado. Analisando ${fileContents.length} arquivos individualmente...`);
+             const individualSummaries: string[] = [];
+             for (let i = 0; i < fileContents.length; i++) {
+                 const file = fileContents[i];
+                 onProgress(`Analisando arquivo ${i + 1}/${fileContents.length}: ${file.fileName}`);
+                 const chunkPrompt = `Você é um analista fiscal. Extraia as métricas e características chave do seguinte documento em formato JSON. Inclua totais, impostos, e datas. Seja conciso.\n\n${file.content}`;
+                 const response = await callGeminiWithRetry([chunkPrompt], logError, false); // Not JSON mode, as it might fail, we get the text and clean it
+                 individualSummaries.push(`--- RESUMO DO ARQUIVO: ${file.fileName} ---\n${response.text}`);
+             }
+             
+             onProgress('Sintetizando o relatório comparativo...');
+             const synthesisPrompt = `
+                Você é um analista fiscal comparativo. Com base nos resumos de múltiplos arquivos fiscais, gere um relatório comparativo.
+                Sua tarefa é gerar uma resposta JSON com a seguinte estrutura:
+                - executiveSummary (string): Resumo das principais diferenças e anomalias.
+                - keyComparisons (array of objects): Compare métricas chave. Cada objeto: { metricName (string), valueFileA (string), valueFileB (string), variance (string), comment (string) }.
+                - identifiedPatterns (array of objects): Padrões repetidos. Cada objeto: { description (string), foundIn (array of strings) }.
+                - anomaliesAndDiscrepancies (array of objects): Anomalias notáveis. Cada objeto: { fileName (string), description (string), severity ('Baixa' | 'Média' | 'Alta') }.
+                Responda APENAS com o objeto JSON.
+
+                RESUMOS DOS ARQUIVOS:
+                ${individualSummaries.join('\n\n')}
             `;
-          }
-          return `--- ARQUIVO (não textual): ${file.name} ---`;
-        })
-    );
+             const finalResponse = await callGeminiWithRetry([synthesisPrompt], logError, true);
+             analysisResult = parseGeminiJsonResponse<ComparativeAnalysisReport>(finalResponse.text, logError);
 
-    const prompt = `
-    # Análise Comparativa de Documentos Fiscais
+        } else {
+            const prompt = `
+                Você é um analista fiscal comparativo. Analise os conteúdos de múltiplos arquivos fiscais e gere um relatório comparativo.
+                Os arquivos estão concatenados abaixo.
 
-    ## Contexto
-    Você é um auditor de IA avançado. Você recebeu ${files.length} arquivos para uma análise comparativa. Os nomes dos arquivos são: ${files.map(f => f.name).join(', ')}.
+                Sua tarefa é gerar uma resposta JSON com a seguinte estrutura:
+                - executiveSummary (string): Resumo das principais diferenças e anomalias.
+                - keyComparisons (array of objects): Compare métricas chave. Cada objeto: { metricName (string), valueFileA (string), valueFileB (string), variance (string), comment (string) }.
+                - identifiedPatterns (array of objects): Padrões repetidos. Cada objeto: { description (string), foundIn (array of strings) }.
+                - anomaliesAndDiscrepancies (array of objects): Anomalias notáveis. Cada objeto: { fileName (string), description (string), severity ('Baixa' | 'Média' | 'Alta') }.
 
-    ## Tarefa
-    Compare os arquivos e gere um relatório de análise comparativa em formato JSON. O objetivo é identificar variações, padrões, anomalias e discrepâncias entre os conjuntos de dados.
+                Responda APENAS com o objeto JSON.
 
-    ## Estrutura JSON de Saída
-    Responda APENAS com o objeto JSON abaixo, dentro de um bloco de código markdown (\`\`\`json ... \`\`\`).
+                CONTEÚDO DOS ARQUIVOS:
+                ${combinedContent}
+            `;
+            const response = await callGeminiWithRetry([prompt], logError, true);
+            analysisResult = parseGeminiJsonResponse<ComparativeAnalysisReport>(response.text, logError);
+        }
 
-    {
-        "executiveSummary": "(String) Um resumo de 2-3 frases sobre as principais descobertas da comparação.",
-        "keyComparisons": [
-            {
-                "metricName": "(String) Nome da métrica chave comparada (ex: 'Valor Total NF-e', 'Alíquota Média ICMS').",
-                "valueFileA": "(String) Valor no primeiro arquivo/grupo.",
-                "valueFileB": "(String) Valor no segundo arquivo/grupo.",
-                "variance": "(String) A variação percentual ou absoluta (ex: '+15.2%', '-R$ 5.432,10').",
-                "comment": "(String) Um breve comentário sobre o significado da variação."
-            }
-        ],
-        "identifiedPatterns": [
-            {
-                "description": "(String) Descrição de um padrão recorrente observado (ex: 'Uso consistente do CFOP 5102 para vendas estaduais').",
-                "foundIn": ["(String) Array com os nomes dos arquivos onde o padrão foi encontrado."]
-            }
-        ],
-        "anomaliesAndDiscrepancies": [
-            {
-                "fileName": "(String) Nome do arquivo onde a anomalia foi encontrada.",
-                "description": "(String) Descrição clara da anomalia ou discrepância (ex: 'NF-e com valor de ICMS zerado para operação tributável').",
-                "severity": "(Enum: 'Baixa', 'Média', 'Alta') A severidade do risco associado."
-            }
-        ]
+        if (!analysisResult || !analysisResult.keyComparisons) {
+            throw new Error("A estrutura do relatório comparativo da IA é inválida.");
+        }
+        
+        const endTime = performance.now();
+        logError({ source: 'geminiService.compare', message: `Análise comparativa concluída em ${(endTime - startTime).toFixed(2)} ms.`, severity: 'info' });
+
+        return analysisResult;
+    } catch(err) {
+        logError({
+            source: 'geminiService.compare',
+            message: 'Falha ao gerar análise comparativa com a IA.',
+            severity: 'critical',
+            details: err,
+        });
+        throw err;
     }
+};
+
+/**
+ * Converts files to Gemini Parts for chat analysis.
+ */
+export const convertFilesToGeminiParts = async (files: File[]): Promise<Part[]> => {
+    const fileToGenerativePart = async (file: File): Promise<Part | null> => {
+        // Simple file type check based on extension
+        const allowedImageTypes = ['image/jpeg', 'image/png', 'image/webp'];
+        if (!allowedImageTypes.includes(file.type)) return null;
+
+        const base64EncodedData = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve((reader.result as string).split(',')[1]);
+            reader.onerror = (error) => reject(error);
+            reader.readAsDataURL(file);
+        });
+        return {
+            inlineData: {
+                data: base64EncodedData,
+                mimeType: file.type,
+            },
+        };
+    };
     
-    ## Conteúdo dos Arquivos
-    ${fileContents.join('\n')}
-    `;
-    
-    const model = 'gemini-2.5-flash';
-    const response = await ai.models.generateContent({
-        model,
-        contents: [{ parts: [{ text: prompt }] }],
+    const fileProcessingPromises = files.map(async (file) => {
+        const mimeType = file.type || '';
+        if (mimeType.startsWith('image/')) {
+            return fileToGenerativePart(file);
+        }
+        
+        const parsedResult = await parseFile(file, () => {});
+        return { text: `\n--- START FILE: ${file.name} ---\n${parsedResult.content}\n--- END FILE: ${file.name} ---\n` };
     });
 
-    const resultText = response.text;
-    const parsedResult = parseJsonFromMarkdown<ComparativeAnalysisReport>(resultText);
-
-    if (!parsedResult || !parsedResult.executiveSummary || !parsedResult.keyComparisons) {
-        console.error("Failed to parse comparative analysis from Gemini response:", resultText);
-        throw new Error("Não foi possível gerar a análise comparativa. Resposta da IA inválida.");
-    }
-    
-    return parsedResult;
+    const results = await Promise.all(fileProcessingPromises);
+    return results.filter((p): p is Part => p !== null);
 };

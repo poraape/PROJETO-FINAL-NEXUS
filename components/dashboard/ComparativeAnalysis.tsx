@@ -10,6 +10,7 @@ interface ComparativeAnalysisProps {
   isLoading: boolean;
   error: string | null;
   report: ComparativeAnalysisReport | null;
+  progressMessage?: string | null;
 }
 
 const severityColor: { [key: string]: 'rose' | 'amber' | 'gray' } = {
@@ -18,7 +19,7 @@ const severityColor: { [key: string]: 'rose' | 'amber' | 'gray' } = {
   'Baixa': 'gray',
 };
 
-export const ComparativeAnalysis: React.FC<ComparativeAnalysisProps> = ({ files, onStart, isLoading, error, report }) => {
+export const ComparativeAnalysis: React.FC<ComparativeAnalysisProps> = ({ files, onStart, isLoading, error, report, progressMessage }) => {
   const canCompare = files.length >= 2;
   const { logError } = useErrorLog(); // This is a placeholder, as the actual call is in Dashboard.tsx
 
@@ -37,6 +38,7 @@ export const ComparativeAnalysis: React.FC<ComparativeAnalysisProps> = ({ files,
         disabled={!canCompare || isLoading}
         className="mt-6 bg-orange-500 hover:bg-orange-600 border-orange-400 text-white font-bold"
         loading={isLoading}
+        loadingText={progressMessage || 'Analisando...'}
       >
         {canCompare ? 'Iniciar Análise Comparativa' : 'Envie pelo menos 2 arquivos'}
       </Button>
