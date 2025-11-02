@@ -9,8 +9,6 @@ import { INITIAL_PIPELINE_STEPS } from './constants.ts';
 import { generateReportFromFiles, getFileContentForAnalysis, getFullContentForIndexing } from './services/geminiService.ts';
 import { GeneratedReport, PipelineStep, ProcessingStepStatus, Theme } from './types.ts';
 import { useErrorLog } from './hooks/useErrorLog.ts';
-import { setApiKey, validateAndStoreApiKey, verifyStoredApiKey } from './config.ts';
-import { ApiKeyModal } from './components/ApiKeyModal.tsx';
 import { clearContext, getLastReportSummary, storeLastReportSummary, createAndStoreIndex, storeForecast } from './services/contextMemory.ts';
 import { extrairDadosParaExportacao } from './services/exporter.ts';
 import { classificarNotas } from './services/classifier.ts';
@@ -30,47 +28,23 @@ function App() {
   const [isErrorLogOpen, setIsErrorLogOpen] = useState(false);
   const { logError } = useErrorLog();
   
-  const [isApiKeyModalOpen, setIsApiKeyModalOpen] = useState(false);
-  const [isAppReady, setIsAppReady] = useState(false);
-  const [isVerifyingKey, setIsVerifyingKey] = useState(true);
-
   useEffect(() => {
     document.body.classList.toggle('light-theme', theme === 'light');
   }, [theme]);
 
   useEffect(() => {
-    const initializeApp = async () => {
-        setIsVerifyingKey(true);
+    const initializeApp = () => {
         iniciarAuditoriaAutomatica();
-        const isKeyValid = await verifyStoredApiKey();
-        if (isKeyValid) {
-            console.log("[App Init] Chave da API armazenada é válida.");
-            setIsAppReady(true);
-            setIsApiKeyModalOpen(false);
-            const lastSummary = getLastReportSummary();
-            if (lastSummary) {
-                setGeneratedReport({ executiveSummary: lastSummary, fullTextAnalysis: undefined });
-                setUploadInfo("Sessão anterior restaurada a partir da memória cognitiva.");
-                setView('dashboard');
-            }
-        } else {
-            console.log("[App Init] Nenhuma chave válida encontrada. Solicitando ao usuário.");
-            setIsAppReady(false);
-            setIsApiKeyModalOpen(true);
+        console.log("[App Init] Application ready. API key is expected from environment.");
+        const lastSummary = getLastReportSummary();
+        if (lastSummary) {
+            setGeneratedReport({ executiveSummary: lastSummary, fullTextAnalysis: undefined });
+            setUploadInfo("Sessão anterior restaurada a partir da memória cognitiva.");
+            setView('dashboard');
         }
-        setIsVerifyingKey(false);
     };
     initializeApp();
   }, []);
-
-  const handleSaveApiKey = async (key: string): Promise<boolean> => {
-    const isValid = await validateAndStoreApiKey(key);
-    if (isValid) {
-        setIsAppReady(true);
-        setIsApiKeyModalOpen(false);
-    }
-    return isValid;
-  };
 
   const updatePipelineStep = useCallback((index: number, status: ProcessingStepStatus, info?: string) => {
     setPipelineSteps(prevSteps => {
@@ -236,23 +210,19 @@ function App() {
 
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'An unknown error occurred.';
+      let displayError = errorMessage;
       
-      if (errorMessage.includes("API key not valid")) {
+      if (errorMessage.toLowerCase().includes("api key") || errorMessage.toLowerCase().includes("api_key")) {
+        displayError = 'Sua chave da API configurada no ambiente é inválida ou expirou. Verifique a configuração e atualize a página.';
         logError({
             source: 'GeminiService',
-            message: 'A chave da API tornou-se inválida. Por favor, reconfigure.',
+            message: 'A chave da API fornecida no ambiente é inválida ou expirou.',
             severity: 'critical',
             details: err,
         });
-        setApiKey(''); 
-        setIsAppReady(false);
-        setIsApiKeyModalOpen(true);
-        setView('upload');
-        setError('Sua chave da API é inválida ou expirou. Por favor, insira uma nova chave.');
-        return; 
       }
 
-      setError(prev => prev ? `${prev}\n${errorMessage}` : errorMessage);
+      setError(prev => prev ? `${prev}\n${displayError}` : displayError);
       logError({
           source: 'FileUpload',
           message: errorMessage,
@@ -281,17 +251,6 @@ function App() {
   };
   
   const renderContent = () => {
-    if (isVerifyingKey) {
-        return (
-            <div className="min-h-[calc(100vh-80px)] flex flex-col items-center justify-center p-4">
-                <div className="flex items-center gap-2 text-content-default">
-                    <div className="w-5 h-5 border-2 border-content-default border-t-transparent rounded-full animate-spin"></div>
-                    <span>Verificando conexão com a API...</span>
-                </div>
-            </div>
-        );
-    }
-
     const commonWrapperClasses = "min-h-[calc(100vh-80px)] flex flex-col items-center justify-center p-4";
     switch(view) {
       case 'upload':
@@ -331,22 +290,19 @@ function App() {
   
   return (
     <div className="text-content-default min-h-screen font-sans">
-      <ApiKeyModal isOpen={isApiKeyModalOpen} onSave={handleSaveApiKey} />
-      {isAppReady && (
-        <>
-          <Header 
-            onLogoClick={handleAnalyzeOtherFiles}
-            theme={theme}
-            onToggleTheme={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
-            onOpenErrorLog={() => setIsErrorLogOpen(true)}
-            processedFiles={view === 'dashboard' ? processedFiles : []}
-          />
-          <main>
-            {renderContent()}
-          </main>
-          <ErrorLogModal isOpen={isErrorLogOpen} onClose={() => setIsErrorLogOpen(false)} />
-        </>
-      )}
+      <>
+        <Header 
+          onLogoClick={handleAnalyzeOtherFiles}
+          theme={theme}
+          onToggleTheme={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
+          onOpenErrorLog={() => setIsErrorLogOpen(true)}
+          processedFiles={view === 'dashboard' ? processedFiles : []}
+        />
+        <main>
+          {renderContent()}
+        </main>
+        <ErrorLogModal isOpen={isErrorLogOpen} onClose={() => setIsErrorLogOpen(false)} />
+      </>
     </div>
   );
 }

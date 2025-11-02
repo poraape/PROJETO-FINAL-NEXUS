@@ -12,7 +12,6 @@ import {
   ClassificationResult,
 } from '../types';
 import { parseFile, extractFullTextFromFile } from './fileParsers.ts';
-import { getApiKey } from '../config.ts';
 
 const CHUNK_TOKEN_THRESHOLD = 8000; // ≈ 32,000 characters
 
@@ -79,9 +78,9 @@ const _callGeminiApiOnce = async (
 
         // 2. Fallback to Direct API
         try {
-            const apiKey = getApiKey();
+            const apiKey = process.env.API_KEY;
             if (!apiKey) {
-                throw new Error("API Key not found for direct fallback.");
+                throw new Error("A variável de ambiente API_KEY não está configurada.");
             }
 
             console.debug(`[GeminiService] Attempting API call directly...`);
