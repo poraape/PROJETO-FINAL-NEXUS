@@ -9,7 +9,7 @@ import { INITIAL_PIPELINE_STEPS } from './constants.ts';
 import { generateReportFromFiles, getFileContentForAnalysis, getFullContentForIndexing } from './services/geminiService.ts';
 import { GeneratedReport, PipelineStep, ProcessingStepStatus, Theme } from './types.ts';
 import { useErrorLog } from './hooks/useErrorLog.ts';
-import { getApiKey, setApiKey } from './config.ts';
+import { setApiKey, validateAndStoreApiKey, verifyStoredApiKey } from './config.ts';
 import { ApiKeyModal } from './components/ApiKeyModal.tsx';
 import { clearContext, getLastReportSummary, storeLastReportSummary, createAndStoreIndex, storeForecast } from './services/contextMemory.ts';
 import { extrairDadosParaExportacao } from './services/exporter.ts';
@@ -32,43 +32,50 @@ function App() {
   
   const [isApiKeyModalOpen, setIsApiKeyModalOpen] = useState(false);
   const [isAppReady, setIsAppReady] = useState(false);
+  const [isVerifyingKey, setIsVerifyingKey] = useState(true);
 
   useEffect(() => {
-    // Start the internal audit agent in the background
-    iniciarAuditoriaAutomatica();
-
-    // Check for API key first
-    if (getApiKey()) {
-      setIsAppReady(true);
-      setIsApiKeyModalOpen(false);
-
-      // Attempt to resume session from cognitive memory
-      const lastSummary = getLastReportSummary();
-      if (lastSummary) {
-        setGeneratedReport({ executiveSummary: lastSummary, fullTextAnalysis: undefined });
-        // Since we don't store files, we'll show a placeholder
-        setUploadInfo("Sessão anterior restaurada a partir da memória cognitiva.");
-        setView('dashboard');
-      }
-
-    } else {
-      setIsApiKeyModalOpen(true);
-    }
-    
     document.body.classList.toggle('light-theme', theme === 'light');
   }, [theme]);
 
-  const handleSaveApiKey = (key: string) => {
-    setApiKey(key);
-    setIsAppReady(true);
-    setIsApiKeyModalOpen(false);
+  useEffect(() => {
+    const initializeApp = async () => {
+        setIsVerifyingKey(true);
+        iniciarAuditoriaAutomatica();
+        const isKeyValid = await verifyStoredApiKey();
+        if (isKeyValid) {
+            console.log("[App Init] Chave da API armazenada é válida.");
+            setIsAppReady(true);
+            setIsApiKeyModalOpen(false);
+            const lastSummary = getLastReportSummary();
+            if (lastSummary) {
+                setGeneratedReport({ executiveSummary: lastSummary, fullTextAnalysis: undefined });
+                setUploadInfo("Sessão anterior restaurada a partir da memória cognitiva.");
+                setView('dashboard');
+            }
+        } else {
+            console.log("[App Init] Nenhuma chave válida encontrada. Solicitando ao usuário.");
+            setIsAppReady(false);
+            setIsApiKeyModalOpen(true);
+        }
+        setIsVerifyingKey(false);
+    };
+    initializeApp();
+  }, []);
+
+  const handleSaveApiKey = async (key: string): Promise<boolean> => {
+    const isValid = await validateAndStoreApiKey(key);
+    if (isValid) {
+        setIsAppReady(true);
+        setIsApiKeyModalOpen(false);
+    }
+    return isValid;
   };
 
   const updatePipelineStep = useCallback((index: number, status: ProcessingStepStatus, info?: string) => {
     setPipelineSteps(prevSteps => {
       const newSteps = [...prevSteps].map((step, i) => {
         if (i < index) {
-          // Fix: Corrected typo from ProcessingStep-Status to ProcessingStepStatus
           return { ...step, status: ProcessingStepStatus.COMPLETED, info: undefined };
         }
         if (i === index) {
@@ -83,9 +90,7 @@ function App() {
   const handleFileUpload = async (files: File[]) => {
     if (view === 'processing') return;
 
-    // Clear previous context before starting a new analysis
     clearContext();
-
     setError(null);
     setUploadInfo('Processando arquivos...');
     setView('processing');
@@ -93,7 +98,7 @@ function App() {
     setProcessedFiles([]);
     setPipelineSteps(INITIAL_PIPELINE_STEPS);
 
-    const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB per file
+    const MAX_FILE_SIZE = 10 * 1024 * 1024;
     const validFiles: File[] = [];
     let oversizedFiles: string[] = [];
     const errorMessages: string[] = [];
@@ -184,13 +189,9 @@ function App() {
       
       setUploadInfo(`Analisando ${currentProcessedFiles.length} arquivo(s)...`);
       
-      // --- Início do Pipeline de Análise Detalhada ---
-
-      // 1. Extração e Leitura (Dados Estruturados e Texto)
       updatePipelineStep(0, ProcessingStepStatus.IN_PROGRESS, "Extraindo dados estruturados...");
       const { documentos } = await extrairDadosParaExportacao(currentProcessedFiles);
       
-      // 1.5. Cálculo de Previsões (Agente de Inteligência Preditiva)
       try {
           logError({ source: 'Forecast', message: 'Calculando previsões...', severity: 'info' });
           const forecast = calcularPrevisoes(documentos);
@@ -205,25 +206,20 @@ function App() {
       const fileContentsForAnalysis = await getFileContentForAnalysis(currentProcessedFiles, updatePipelineStep, logError);
       updatePipelineStep(0, ProcessingStepStatus.COMPLETED);
 
-      // 2. Agente Auditor (Simulado)
       updatePipelineStep(1, ProcessingStepStatus.IN_PROGRESS, "Ag. Auditor: Verificando consistência...");
       await new Promise(res => setTimeout(res, 300));
       updatePipelineStep(1, ProcessingStepStatus.COMPLETED);
 
-      // 3. Agente Classificador (IA + Fallback)
       updatePipelineStep(2, ProcessingStepStatus.IN_PROGRESS, "Ag. Classificador: Organizando informações...");
       const classifications = await classificarNotas(documentos, logError);
       updatePipelineStep(2, ProcessingStepStatus.COMPLETED);
 
-      // 4. Agente de Inteligência (Geração do Resumo)
       updatePipelineStep(3, ProcessingStepStatus.IN_PROGRESS, "Ag. Inteligência: Gerando análise executiva...");
       const executiveSummary = await generateReportFromFiles(fileContentsForAnalysis, classifications, logError);
       updatePipelineStep(3, ProcessingStepStatus.COMPLETED);
       
-      // Store the successful analysis in cognitive memory
       storeLastReportSummary(executiveSummary);
 
-      // 5. Indexação para Chat (Agente Contador/Memória)
       try {
           updatePipelineStep(4, ProcessingStepStatus.IN_PROGRESS, "Ag. Contador: Indexando conteúdo para chat...");
           const indexingContents = await getFullContentForIndexing(currentProcessedFiles, logError);
@@ -231,21 +227,31 @@ function App() {
           updatePipelineStep(4, ProcessingStepStatus.COMPLETED, "Indexação concluída!");
       } catch (err) {
           logError({ source: 'App.Indexing', message: 'Falha ao indexar conteúdo para o chat. O chat pode não ter contexto.', severity: 'warning', details: err });
-          // Do not fail the entire process, just move on.
            updatePipelineStep(4, ProcessingStepStatus.COMPLETED, "Indexação com avisos.");
       }
 
-
-      const initialReport: GeneratedReport = {
-          executiveSummary,
-          fullTextAnalysis: undefined,
-      };
-
+      const initialReport: GeneratedReport = { executiveSummary, fullTextAnalysis: undefined };
       setGeneratedReport(initialReport);
       setView('dashboard');
 
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'An unknown error occurred.';
+      
+      if (errorMessage.includes("API key not valid")) {
+        logError({
+            source: 'GeminiService',
+            message: 'A chave da API tornou-se inválida. Por favor, reconfigure.',
+            severity: 'critical',
+            details: err,
+        });
+        setApiKey(''); 
+        setIsAppReady(false);
+        setIsApiKeyModalOpen(true);
+        setView('upload');
+        setError('Sua chave da API é inválida ou expirou. Por favor, insira uma nova chave.');
+        return; 
+      }
+
       setError(prev => prev ? `${prev}\n${errorMessage}` : errorMessage);
       logError({
           source: 'FileUpload',
@@ -275,14 +281,23 @@ function App() {
   };
   
   const renderContent = () => {
+    if (isVerifyingKey) {
+        return (
+            <div className="min-h-[calc(100vh-80px)] flex flex-col items-center justify-center p-4">
+                <div className="flex items-center gap-2 text-content-default">
+                    <div className="w-5 h-5 border-2 border-content-default border-t-transparent rounded-full animate-spin"></div>
+                    <span>Verificando conexão com a API...</span>
+                </div>
+            </div>
+        );
+    }
+
     const commonWrapperClasses = "min-h-[calc(100vh-80px)] flex flex-col items-center justify-center p-4";
     switch(view) {
       case 'upload':
         return (
           <div className={commonWrapperClasses}>
-            {/* Hero Section */}
             <section className="text-center mb-12 px-4 animate-subtle-bob">
-                
                 <p className="text-content-default leading-relaxed max-w-3xl mx-auto">
                     Nexus QuantumI2A2 é um ecossistema inteligente de análise e decisão fiscal que combina processamento automatizado, inteligência adaptativa e visão estratégica. Integrando múltiplas camadas de IA, o sistema transforma dados fiscais complexos em conhecimento acionável — oferecendo precisão analítica, automação contínua e insights que evoluem com o contexto tributário.
                 </p>
@@ -290,7 +305,6 @@ function App() {
                     Inovação, clareza e inteligência conectada — o futuro da análise fiscal começa aqui.
                 </p>
             </section>
-            
             <FileUpload onFileUpload={handleFileUpload} error={error} />
           </div>
         );
@@ -305,7 +319,6 @@ function App() {
         if (generatedReport) {
           return <Dashboard initialReport={generatedReport} processedFiles={processedFiles} onAnalyzeOther={handleAnalyzeOtherFiles} logError={logError} />;
         }
-        // This case handles session resume where dashboard is the view but report is still loading from memory
         return (
              <div className={commonWrapperClasses}>
                 <p>Restaurando sessão...</p>

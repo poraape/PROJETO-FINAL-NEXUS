@@ -3,20 +3,26 @@ import { Dialog, DialogPanel, Title, TextInput, Button } from '@tremor/react';
 
 interface ApiKeyModalProps {
   isOpen: boolean;
-  onSave: (key: string) => void;
+  onSave: (key: string) => Promise<boolean>;
 }
 
 export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({ isOpen, onSave }) => {
   const [key, setKey] = useState('');
   const [error, setError] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (!key.trim()) {
       setError('A chave da API não pode estar em branco.');
       return;
     }
     setError('');
-    onSave(key.trim());
+    setIsSaving(true);
+    const success = await onSave(key.trim());
+    setIsSaving(false);
+    if (!success) {
+      setError('A chave da API fornecida é inválida. Verifique e tente novamente.');
+    }
   };
 
   return (
@@ -36,8 +42,8 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({ isOpen, onSave }) => {
           errorMessage={error}
           className="mb-4"
         />
-        <Button onClick={handleSave} className="w-full bg-blue-600 hover:bg-blue-700 border-none">
-          Salvar e Continuar
+        <Button onClick={handleSave} className="w-full bg-blue-600 hover:bg-blue-700 border-none" loading={isSaving} disabled={isSaving}>
+          {isSaving ? 'Verificando...' : 'Salvar e Continuar'}
         </Button>
         <p className="text-xs text-content-default/70 mt-4">
           Não tem uma chave? Obtenha uma no{' '}

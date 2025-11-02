@@ -7,6 +7,7 @@ const CONTEXT_KEYS = {
     SIMULATION_CACHE: 'SIMULATION_CACHE',
     DOCUMENT_INDEX: 'DOCUMENT_INDEX',
     QA_CACHE: 'QA_CACHE',
+    CHART_CACHE: 'CHART_CACHE',
     CLASSIFICATIONS: 'CLASSIFICATIONS',
     FORECAST: 'FORECAST',
 };
@@ -170,6 +171,28 @@ export const getAnswer = (question: string): string | null => {
     }
     return cachedAnswer;
 };
+
+// 4. Chart Caching
+const getChartCache = (): Record<string, any> => getContext<Record<string, any>>(CONTEXT_KEYS.CHART_CACHE) || {};
+
+export const storeChartConfig = (question: string, config: any) => {
+    const cache = getChartCache();
+    const key = question.trim().toLowerCase();
+    cache[key] = config;
+    storeContext(CONTEXT_KEYS.CHART_CACHE, cache);
+    console.debug(`[ContextMemory.Chart] Config for "${key}" stored in cache.`);
+};
+
+export const getChartConfig = (question: string): any | null => {
+    const cache = getChartCache();
+    const key = question.trim().toLowerCase();
+    const cachedConfig = cache[key] || null;
+    if (cachedConfig) {
+        console.debug(`[ContextMemory.Chart] Config for "${key}" found in cache.`);
+    }
+    return cachedConfig;
+};
+
 
 // --- Classification Cache ---
 export const storeClassifications = (classifications: ClassificationResult[]) => storeContext(CONTEXT_KEYS.CLASSIFICATIONS, classifications);

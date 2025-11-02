@@ -107,10 +107,18 @@ export interface ComparativeAnalysisReport {
 }
 
 
+export interface ChartConfig {
+  type: 'bar' | 'line' | 'pie';
+  title: string;
+  xField: string;
+  yField: string;
+  data: { [key: string]: any }[];
+}
+
 export interface ChatMessage {
   sender: 'user' | 'ai';
   content: string;
-  chartData?: any;
+  chartData?: ChartConfig | null;
 }
 
 export interface DocumentoFiscalDetalhado {

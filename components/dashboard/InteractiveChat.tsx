@@ -5,7 +5,7 @@ import { ChatChart } from './ChatChart.tsx';
 import { useErrorLog } from '../../hooks/useErrorLog.ts';
 import { PaperclipIcon } from '../icons/PaperclipIcon.tsx';
 import { XCircleIcon } from '../icons/XCircleIcon.tsx';
-import { getChatResponse } from '../../services/chatService.ts';
+import { getChatResponse, generateChartConfigFromData } from '../../services/chatService.ts';
 
 const SendIcon: React.FC<React.SVGProps<SVGSVGElement>> = (props) => (
     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" {...props}>
@@ -58,19 +58,44 @@ export const InteractiveChat: React.FC<{
   const handleSend = async () => {
     if ((!input.trim() && attachedFiles.length === 0) || isTyping) return;
 
-    const userMessageContent = attachedFiles.length > 0 
+    const userMessageContent = attachedFiles.length > 0
         ? `${input}\n\n[Analisando ${attachedFiles.length} arquivo(s) em anexo...]`
         : input;
 
     const userMessage: ChatMessage = { sender: 'user', content: userMessageContent };
     setMessages(prev => [...prev, userMessage]);
+    
     const currentInput = input;
     const currentFiles = [...attachedFiles];
     setInput('');
     setAttachedFiles([]);
     setIsTyping(true);
-    
+
     try {
+      const chartKeywords = ['gráfico', 'visualização', 'tendência', 'distribuição', 'mostre', 'exiba', 'compare', 'evolução'];
+      const isChartRequest = chartKeywords.some(kw => currentInput.toLowerCase().includes(kw));
+
+      if (isChartRequest) {
+        setMessages(prev => [...prev, { sender: 'ai', content: 'Analisando dados para gerar uma visualização...' }]);
+        const chartConfig = await generateChartConfigFromData(currentInput, report, logError);
+        
+        setMessages(prev => prev.slice(0, prev.length - 1));
+
+        if (chartConfig) {
+            const aiResponse: ChatMessage = { 
+                sender: 'ai', 
+                content: `Aqui está a visualização para "${chartConfig.title}".`,
+                chartData: chartConfig 
+            };
+            setMessages(prev => [...prev, aiResponse]);
+        } else {
+            const fallbackMessage: ChatMessage = { 
+                sender: 'ai', 
+                content: 'Desculpe, não consegui gerar um gráfico com base na sua solicitação. Poderia tentar reformular a pergunta de forma mais específica sobre os dados?' 
+            };
+            setMessages(prev => [...prev, fallbackMessage]);
+        }
+      } else {
         const responseText = await getChatResponse(
             currentInput,
             processedFiles,
@@ -80,6 +105,7 @@ export const InteractiveChat: React.FC<{
         
         const aiResponse: ChatMessage = { sender: 'ai', content: responseText };
         setMessages(prev => [...prev, aiResponse]);
+      }
 
     } catch (error) {
         console.error("Chat error:", error);
