@@ -1,7 +1,7 @@
 // services/exportService.ts
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
-import { Document, Packer, Paragraph, TextRun } from 'docx';
+import { Document, Packer, Paragraph, TextRun, HeadingLevel, ImageRun } from 'docx';
 
 /**
  * Função utilitária para salvar um blob de arquivo.
@@ -19,52 +19,45 @@ function salvarArquivo(blob: Blob, nome: string) {
 }
 
 /**
- * Coleta o HTML renderizado do painel de controle ativo.
- * @returns Uma string HTML do conteúdo do dashboard.
+ * Captura o elemento HTML do painel de controle ativo.
+ * @returns Um elemento HTML ou nulo se não for encontrado.
  */
-function capturarDadosDashboard(): string {
+function capturarElementoDashboard(): HTMLElement | null {
   const dashboardContent = document.querySelector('#dashboard-view-content > div');
-  if (!dashboardContent) {
-      return '<h2>📊 Painel Analítico</h2><p>Nenhum conteúdo do dashboard ativo foi encontrado para exportação.</p>';
-  }
-
-  const clone = dashboardContent.cloneNode(true) as HTMLElement;
-  const titleElement = clone.querySelector('h2');
-  const title = titleElement ? titleElement.innerText : 'Painel Analítico';
-  
-  return `<h2>📊 ${title}</h2>${clone.innerHTML}`;
+  return dashboardContent as HTMLElement | null;
 }
 
 /**
  * Extrai as mensagens do chat interativo a partir do DOM.
  * @returns Um array de objetos representando as mensagens do chat.
  */
-function capturarMensagensChat(): { role: string; text: string }[] {
-  const mensagens = Array.from(document.querySelectorAll(".chat-message"))
-    .map(el => {
-      const role = el.classList.contains("user") ? "Usuário" : "Nexus AI";
-      // Seleciona o parágrafo principal da mensagem, ignorando avatares ou outros elementos.
-      const textElement = el.querySelector('p');
-      const text = textElement ? textElement.innerText.trim() : '';
-      return { role, text };
-    });
-  return mensagens;
+function capturarMensagensChat(): { sender: string; content: string }[] {
+  const messages: { sender: string; content: string }[] = [];
+  const messageNodes = document.querySelectorAll('#chat-messages-container > div.flex.items-start');
+  
+  messageNodes.forEach(node => {
+      const isUser = (node as HTMLElement).classList.contains('justify-end');
+      const sender = isUser ? 'Usuário' : 'Nexus AI';
+      const contentEl = node.querySelector('p');
+      if (contentEl) {
+          messages.push({ sender, content: contentEl.innerText });
+      }
+  });
+
+  return messages;
 }
 
 /**
  * Gera um cabeçalho HTML padronizado para os relatórios.
  * @returns Uma string HTML contendo o cabeçalho.
  */
-function gerarCabecalhoPadrao(): string {
+function gerarCabecalhoPadraoHTML(): string {
   const data = new Date().toLocaleString('pt-BR');
-  const versao = "v2.1.0"; 
-  const usuario = localStorage.getItem("userSession") || "Sessão Anônima";
-
   return `
-  <header style="text-align:center; margin-bottom: 20px; border-bottom: 1px solid #eee; padding-bottom: 10px;">
+  <header style="text-align:center; margin-bottom: 2rem; border-bottom: 1px solid #eee; padding-bottom: 1rem;">
     <h1 style="font-size: 24px; font-weight: bold; margin: 0; color: #1a1a1a;">Nexus QuantumI2A2 — Relatório Analítico</h1>
     <p style="font-size: 12px; color: #555; margin: 5px 0 0 0;">
-      <strong>Versão:</strong> ${versao} | <strong>Exportado em:</strong> ${data} | <strong>Usuário:</strong> ${usuario}
+      <strong>Exportado em:</strong> ${data}
     </p>
   </header>
   `;
@@ -72,56 +65,63 @@ function gerarCabecalhoPadrao(): string {
 
 /**
  * Monta o documento HTML completo a ser exportado.
- * @param dashboardHtml O HTML do dashboard.
- * @param chatMessages As mensagens do chat.
  * @returns Uma string contendo o HTML completo do documento.
  */
-function montarDocumentoCompleto(dashboardHtml: string, chatMessages: { role: string; text: string }[]): string {
+function montarDocumentoCompletoHTML(): string {
+  const dashboardEl = capturarElementoDashboard();
+  const chatMessages = capturarMensagensChat();
+  
+  const dashboardHtml = dashboardEl ? dashboardEl.outerHTML : '<h2>Painel Analítico</h2><p>Conteúdo não encontrado.</p>';
+  
   const chatHtml = chatMessages.map(m => 
-    `<div style="margin-bottom: 10px; padding: 8px; border-radius: 5px; background-color: ${m.role === 'Usuário' ? '#e0e0e0' : '#f0f0f0'};">
-        <strong style="color: #333;">${m.role}:</strong>
-        <p style="margin: 5px 0 0 0; white-space: pre-wrap; word-wrap: break-word;">${m.text}</p>
+    `<div style="margin-bottom: 10px; padding: 8px; border-radius: 5px; background-color: ${m.sender === 'Usuário' ? '#e9eaf6' : '#f4f4f5'};">
+        <strong style="color: #333;">${m.sender}:</strong>
+        <p style="margin: 5px 0 0 0; white-space: pre-wrap; word-wrap: break-word;">${m.content}</p>
      </div>`
   ).join("\n");
 
   return `
-  <section id="dashboard">
-    ${dashboardHtml}
-  </section>
-  <div style="page-break-before: always;"></div>
-  <section id="chat">
-    <h2>💬 Conversas e Análises Contextuais</h2>
-    ${chatHtml}
-  </section>
+    ${gerarCabecalhoPadraoHTML()}
+    <section id="dashboard-export">${dashboardHtml}</section>
+    <div style="page-break-before: always;"></div>
+    <section id="chat-export">
+      <h2 style="font-size: 20px; font-weight: bold; border-bottom: 1px solid #eee; padding-bottom: 5px;">💬 Conversa com IA</h2>
+      ${chatHtml}
+    </section>
   `;
 }
 
 /**
  * Gera e baixa um arquivo PDF com o conteúdo.
  */
-async function gerarPDF(conteudo: string, cabecalho: string) {
+async function gerarPDF() {
+  const tempContainer = document.createElement('div');
+  // Estilos para renderização fora da tela
+  tempContainer.style.position = 'absolute';
+  tempContainer.style.left = '-9999px';
+  tempContainer.style.width = '700px'; // Largura similar a A4
+  tempContainer.style.backgroundColor = 'white'; // Garante fundo não transparente
+  tempContainer.innerHTML = montarDocumentoCompletoHTML();
+  document.body.appendChild(tempContainer);
+  
   const pdf = new jsPDF({
     orientation: 'p',
     unit: 'pt',
     format: 'a4',
   });
-
-  const fullHTML = `
-    <div style="font-family: Helvetica, Arial, sans-serif; font-size: 10pt; color: #333; width: 500pt; margin: 0 auto;">
-        ${cabecalho}
-        ${conteudo}
-    </div>`;
-
-  await pdf.html(fullHTML, {
+  
+  await pdf.html(tempContainer, {
     callback: (doc) => {
-      doc.save("Relatorio_NexusQuantumI2A2.pdf");
+      doc.save(`Relatorio_Nexus_QuantumI2A2_${Date.now()}.pdf`);
+      document.body.removeChild(tempContainer);
     },
     margin: [40, 40, 40, 40],
     autoPaging: 'slice',
     html2canvas: {
-      scale: 0.75,
+      scale: 0.7,
       useCORS: true,
       logging: false,
+      backgroundColor: '#ffffff', // Importante para a renderização do canvas
     }
   });
 }
@@ -129,50 +129,70 @@ async function gerarPDF(conteudo: string, cabecalho: string) {
 /**
  * Gera e baixa um arquivo DOCX com o conteúdo.
  */
-async function gerarDOCX(dashboardHtml: string, chatMessages: { role: string; text: string }[]) {
-  const tempDiv = document.createElement('div');
-  tempDiv.innerHTML = dashboardHtml;
-  
-  const dashboardTitle = new Paragraph({ text: "📊 Painel Analítico", heading: 'Heading1' });
-  // Simplificado: extrai texto. Uma implementação mais complexa poderia mapear tags para elementos DOCX.
-  const dashboardText = new Paragraph({ text: tempDiv.innerText || 'Conteúdo do dashboard indisponível.' });
-  
-  const chatTitle = new Paragraph({ text: "💬 Conversas e Análises Contextuais", heading: 'Heading1' });
-  const chatParagraphs = chatMessages.map(m => 
-    new Paragraph({
-      children: [
-        new TextRun({ text: `${m.role}: `, bold: true }),
-        new TextRun(m.text),
-      ],
-      spacing: { after: 200 }
-    })
-  );
+async function gerarDOCX() {
+    const dashboardEl = capturarElementoDashboard();
+    const chatMessages = capturarMensagensChat();
+    const children: (Paragraph | ImageRun)[] = [];
 
-  const doc = new Document({
-    sections: [{
-      children: [
-        dashboardTitle,
-        dashboardText,
-        chatTitle,
-        ...chatParagraphs,
-      ],
-    }],
-  });
+    children.push(new Paragraph({ text: "Nexus QuantumI2A2 — Relatório Analítico", heading: HeadingLevel.TITLE }));
+    children.push(new Paragraph({ text: `Exportado em: ${new Date().toLocaleString('pt-BR')}`, style: "IntenseQuote" }));
+
+    if (dashboardEl) {
+        const dashboardTitle = dashboardEl.querySelector('h2');
+        children.push(new Paragraph({ text: dashboardTitle ? dashboardTitle.innerText : "Painel Analítico", heading: HeadingLevel.HEADING_1, spacing: { before: 400 } }));
+
+        const canvas = await html2canvas(dashboardEl, {
+            useCORS: true,
+            backgroundColor: document.body.classList.contains('light-theme') ? '#F9FAFB' : '#0D1117'
+        });
+        const dataUrl = canvas.toDataURL();
+        
+        children.push(new Paragraph({
+            children: [
+                new ImageRun({
+                    data: dataUrl,
+                    transformation: {
+                        width: 600,
+                        height: (canvas.height * 600) / canvas.width,
+                    },
+                }),
+            ]
+        }));
+    }
+
+    if (chatMessages.length > 0) {
+        children.push(new Paragraph({ text: "Conversa com IA", heading: HeadingLevel.HEADING_1, pageBreakBefore: true, spacing: { before: 400 } }));
+        chatMessages.forEach(msg => {
+            children.push(new Paragraph({
+                children: [
+                    new TextRun({ text: `${msg.sender}: `, bold: true }),
+                    new TextRun(msg.content),
+                ],
+                spacing: { after: 200 }
+            }));
+        });
+    }
+
+    const doc = new Document({
+        sections: [{
+            children,
+        }],
+    });
   
-  const blob = await Packer.toBlob(doc);
-  salvarArquivo(blob, "Relatorio_NexusQuantumI2A2.docx");
+    const blob = await Packer.toBlob(doc);
+    salvarArquivo(blob, `Relatorio_Nexus_QuantumI2A2_${Date.now()}.docx`);
 }
 
 /**
  * Gera e baixa um arquivo HTML com o conteúdo.
  */
-async function gerarHTML(conteudo: string, cabecalho: string) {
+async function gerarHTML() {
   const theme = document.body.classList.contains('light-theme') ? 'light' : 'dark';
   const colors = theme === 'dark' ? 
     { bg: '#0D1117', text: '#D1D5DB', heading: '#F9FAFB', border: '#333' } : 
     { bg: '#F9FAFB', text: '#374151', heading: '#111827', border: '#ddd' };
 
-  const html = `
+  const htmlContent = `
   <!DOCTYPE html>
   <html lang="pt-BR">
   <head>
@@ -181,23 +201,22 @@ async function gerarHTML(conteudo: string, cabecalho: string) {
     <style>
       body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 40px; background-color: ${colors.bg}; color: ${colors.text}; }
       h1, h2, h3 { color: ${colors.heading}; border-bottom: 1px solid ${colors.border}; padding-bottom: 5px; }
-      header { text-align: left; }
-      section { margin-bottom: 30px; }
+      header, section { margin-bottom: 30px; }
       p { line-height: 1.6; }
       strong { color: ${colors.heading}; }
-      /* Adiciona estilos básicos para Tremor components */
-      .tremor-Card-root { border: 1px solid ${colors.border}; border-radius: 0.5rem; padding: 1rem; margin-bottom: 1rem; }
+      /* Estilos básicos para simular componentes Tremor */
+      .tremor-Card-root { border: 1px solid ${colors.border}; border-radius: 0.5rem; padding: 1rem; margin-bottom: 1rem; background-color: ${theme === 'dark' ? '#1F2937' : '#FFFFFF'}; }
       .tremor-Title-root { font-size: 1.25rem; font-weight: 600; }
     </style>
   </head>
   <body>
-    ${cabecalho.replace('text-align:center', 'text-align:left')}
-    ${conteudo}
+    ${montarDocumentoCompletoHTML().replace('style="text-align:center;', 'style="text-align:left;')}
   </body>
   </html>
   `;
-  salvarArquivo(new Blob([html], { type: "text/html;charset=utf-8" }), "Relatorio_NexusQuantumI2A2.html");
+  salvarArquivo(new Blob([htmlContent], { type: "text/html;charset=utf-8" }), `Relatorio_Nexus_QuantumI2A2_${Date.now()}.html`);
 }
+
 
 /**
  * Função principal que orquestra a exportação completa.
@@ -205,24 +224,25 @@ async function gerarHTML(conteudo: string, cabecalho: string) {
  */
 export async function exportarConteudoCompleto(formato: "pdf" | "docx" | "html") {
   console.log(`[ExportService] Iniciando exportação para ${formato.toUpperCase()}`);
-  const dashboardHtml = capturarDadosDashboard();
-  const chatMessages = capturarMensagensChat();
-  const cabecalho = gerarCabecalhoPadrao();
-  const conteudoHtml = montarDocumentoCompleto(dashboardHtml, chatMessages);
-
-  switch (formato) {
-    case "pdf":
-      await gerarPDF(conteudoHtml, cabecalho);
-      break;
-    case "docx":
-      await gerarDOCX(dashboardHtml, chatMessages);
-      break;
-    case "html":
-      await gerarHTML(conteudoHtml, cabecalho);
-      break;
-    default:
-      console.error(`[ExportService] Formato de exportação desconhecido: ${formato}`);
-      throw new Error("Formato de exportação não suportado.");
+  
+  try {
+    switch (formato) {
+      case "pdf":
+        await gerarPDF();
+        break;
+      case "docx":
+        await gerarDOCX();
+        break;
+      case "html":
+        await gerarHTML();
+        break;
+      default:
+        throw new Error("Formato de exportação não suportado.");
+    }
+    console.log(`[ExportService] Exportação para ${formato.toUpperCase()} concluída.`);
+  } catch(e) {
+      console.error(`[ExportService] Falha ao exportar para ${formato.toUpperCase()}:`, e);
+      // Relança o erro para ser capturado pela UI no Header.tsx
+      throw e;
   }
-  console.log(`[ExportService] Exportação para ${formato.toUpperCase()} concluída.`);
 }
