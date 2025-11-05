@@ -1,80 +1,17 @@
 // Fix: Implementing the Gemini service to handle API calls for report generation and analysis.
 import { Part } from '@google/genai';
 import {
-  ProcessingStepStatus,
-  SimulationParams,
   SimulationResult,
   ComparativeAnalysisReport,
   LogError,
-  GeneratedReport,
   TaxScenario,
   ClassificationResult,
   ExecutiveSummary,
 } from '../types';
 import { parseFile, extractFullTextFromFile } from './fileParsers.ts';
-import { GEMINI_API_KEY } from '../config.ts';
-
-// --- Global API Queue System ---
-// This queue ensures that API calls are made sequentially to avoid rate limiting (429) and server overload errors (500).
-
-interface QueuedTask<T> {
-  task: () => Promise<T>;
-  resolve: (value: T | PromiseLike<T>) => void;
-  reject: (reason?: any) => void;
-}
-
-const queue: QueuedTask<any>[] = [];
-let isProcessingQueue = false;
-
-/**
- * Processes the queue one task at a time.
- * Includes adaptive delays after success or failure.
- */
-async function processQueue() {
-  if (isProcessingQueue || queue.length === 0) return;
-  isProcessingQueue = true;
-
-  const { task, resolve, reject } = queue.shift()!;
-
-  try {
-    const result = await task();
-    resolve(result);
-    // Wait for 1 second after a successful request to stay within typical rate limits.
-    await new Promise(r => setTimeout(r, 1000));
-  } catch (error) {
-    console.error('[QueueProcessor] Task failed, rejecting promise.', error);
-    reject(error);
-    // Wait longer after a failure to allow the API to recover.
-    await new Promise(r => setTimeout(r, 3000));
-  } finally {
-    isProcessingQueue = false;
-    // Immediately attempt to process the next item.
-    processQueue();
-  }
-}
-
-/**
- * Adds a Gemini API call to the global queue.
- * @param task A function that returns the promise from the API call (e.g., `() => callGeminiWithRetry(...)`).
- * @returns A promise that resolves or rejects when the task is completed.
- */
-export function enqueueGeminiCall<T>(task: () => Promise<T>): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    queue.push({ task, resolve, reject });
-    if (!isProcessingQueue) {
-      processQueue();
-    }
-  });
-}
-
+import { BFF_API_URL } from '../config.ts';
 
 const CHUNK_TOKEN_THRESHOLD = 7000; // ≈ 28,000 characters
-
-// --- API Call Strategy with Fallback ---
-
-const GEMINI_PROXY_URL = "https://nexus-quantumi2a2-747991255581.us-west1.run.app/api-proxy/v1beta/models";
-const GEMINI_DIRECT_URL = "https://generativelangue.googleapis.com/v1beta/models";
-const DEFAULT_MODEL = "gemini-2.5-flash";
 
 interface GeminiApiResponse {
   candidates?: {
@@ -88,44 +25,41 @@ interface GeminiApiResponse {
   };
   // Properties to mimic SDK's GenerateContentResponse
   text: string;
-  json: () => any;
 }
 
 /**
- * Faz uma chamada para o nosso BFF, que atuará como um proxy seguro para a API Gemini.
- * A lógica de fallback e retries agora é responsabilidade do backend.
+ * Função centralizada para fazer chamadas aos endpoints do BFF.
+ * Abstrai a lógica de fetch, headers e tratamento de erros.
  */
-const _callGeminiApiOnce = async (
-    parts: Part[],
-    isJsonMode: boolean
-): Promise<GeminiApiResponse> => {
-    const payload = {
-        promptParts: parts,
-        isJsonMode: isJsonMode,
-    };
-
+const callBffEndpoint = async <T>(
+    endpoint: string,
+    options: RequestInit = {}
+): Promise<T> => {
     try {
-        const response = await fetch(BFF_API_URL, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
+        const response = await fetch(`${BFF_API_URL}${endpoint}`, {
+            ...options,
+            headers: {
+                'Content-Type': 'application/json',
+                ...options.headers,
+            },
         });
 
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({ message: response.statusText }));
-            throw new Error(`Erro no BFF: ${response.status} - ${errorData.message || 'Erro desconhecido'}`);
+            throw new Error(`Erro no BFF (${endpoint}): ${response.status} - ${errorData.message || 'Erro desconhecido'}`);
         }
         
-        const data = await response.json();
-        const responseText = data.text ?? '';
-        return { ...data, text: responseText, json: () => data.json() };
+        // Retorna uma resposta vazia se o status for 204 No Content
+        if (response.status === 204) {
+            return {} as T;
+        }
+
+        return await response.json() as T;
     } catch (error) {
-        console.error("[GeminiService] Falha na chamada ao BFF:", error);
-        // O erro já vem formatado do BFF ou da falha de fetch.
+        console.error(`[BFF Client] Falha na chamada para ${endpoint}:`, error);
         throw error;
     }
 };
-
 
 // --- Helper Functions ---
 
@@ -134,103 +68,21 @@ export const estimateTokens = (text: string): number => {
     return Math.ceil(text.length / 4);
 };
 
-// Fix: Export 'callGeminiWithRetry' to be used in other modules.
-export const callGeminiWithRetry = async (
-    promptParts: (string | Part)[], 
-    logError: (error: Omit<LogError, 'timestamp'>) => void,
-    isJsonMode: boolean = true
-): Promise<GeminiApiResponse> => {
-    const MAX_RETRIES = 3;
-    let lastError: any = null;
-
-    const mutableParts: Part[] = promptParts.map(part =>
-        typeof part === 'string' ? { text: part } : part
-    );
-
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-        const startTime = performance.now();
-        try { // A lógica de retry agora é mais simples, pois o BFF abstrai a complexidade.
-            console.log(`DEBUG: Chamada da API Gemini (tentativa ${attempt}/${MAX_RETRIES}). Tamanho do payload: ${JSON.stringify(mutableParts).length} caracteres.`);
-            
-            const response = await _callGeminiApiOnce(mutableParts, isJsonMode);
-            
-            const duration = performance.now() - startTime;
-            logError({
-                source: 'geminiService',
-                message: `Chamada da API bem-sucedida em ${duration.toFixed(0)}ms.`,
-                severity: 'info',
-            });
-
-            if (!response.text && !response.candidates) {
-                 const blockReason = response.promptFeedback?.blockReason;
-                 throw new Error(`A resposta da IA estava vazia ou foi bloqueada. Motivo: ${blockReason || 'Desconhecido'}.`);
-            }
-            return response;
-        } catch (error: any) {
-            lastError = error;
-            const errorMessage = error.toString().toLowerCase();
-            // Retriable errors are server-side issues or rate limiting.
-            const isRetriableError = errorMessage.includes('500') || errorMessage.includes('429') || errorMessage.includes('bff');
-            
-            if (isRetriableError && attempt < MAX_RETRIES) {
-                // Exponential backoff with jitter
-                const waitTime = (2 ** attempt) * 1000 + Math.random() * 1000; 
-                const logMessage = errorMessage.includes('429') 
-                    ? `Limite de taxa da API atingido. Tentando novamente em ${Math.round(waitTime / 1000)}s...`
-                    : `Falha na chamada da API Gemini (tentativa ${attempt}/${MAX_RETRIES}). Tentando novamente em ${Math.round(waitTime / 1000)}s...`;
-                
-                logError({
-                    source: 'geminiService',
-                    message: logMessage,
-                    severity: 'warning',
-                    details: { error: error.message },
-                });
-
-                await new Promise(res => setTimeout(res, waitTime));
-            } else {
-                 try {
-                    localStorage.setItem('lastFailedGeminiPayload', JSON.stringify({ parts: mutableParts }));
-                 } catch (e) { /* ignore storage errors */ }
-                 // Make the final error more specific
-                 const finalErrorMessage = errorMessage.includes('429')
-                    ? `Limite de taxa da API excedido após múltiplas tentativas. Por favor, verifique seu plano e faturamento.`
-                    : `Falha na API Gemini após ${attempt} tentativas. Erro: ${error.message}`;
-                 throw new Error(finalErrorMessage);
-            }
-        }
-    }
-    throw lastError; // Should not be reached, but for safety.
-};
-
-// Fix: Export 'parseGeminiJsonResponse' to be used in other modules.
-export const parseGeminiJsonResponse = <T>(text: string, logError: (error: Omit<LogError, 'timestamp'>) => void): T => {
-    try {
-        return JSON.parse(text) as T;
-    } catch (e) {
-        logError({
-            source: 'geminiService.jsonParser',
-            message: 'Falha ao analisar a resposta JSON da Gemini.',
-            severity: 'critical',
-            details: { error: e, responseText: text },
-        });
-        throw new Error("A resposta da IA não está em um formato JSON válido.");
-    }
-};
-
 /**
  * Gets summarized/processed content for generating the executive report.
+ * Esta função permanece no frontend pois lida com a UI (updatePipelineStep).
  */
 export const getFileContentForAnalysis = async (
     files: File[],
-    updatePipelineStep: (index: number, status: ProcessingStepStatus, info?: string) => void,
+    updateProgress: (info: string) => void,
     logError: (error: Omit<LogError, 'timestamp'>) => void
 ): Promise<{fileName: string, content: string}[]> => {
     const parsedFileContents: {fileName: string, content: string}[] = [];
     for (const file of files) {
         try {
-            updatePipelineStep(0, ProcessingStepStatus.IN_PROGRESS, `Lendo e extraindo dados de: ${file.name}`);
+            updateProgress(`Lendo e extraindo dados de: ${file.name}`);
             const result = await parseFile(file, (progressInfo) => {
-                 updatePipelineStep(0, ProcessingStepStatus.IN_PROGRESS, `${file.name}: ${progressInfo}`);
+                 updateProgress(`${file.name}: ${progressInfo}`);
             });
             if (result.type === 'text') {
                 parsedFileContents.push({fileName: file.name, content: result.content});
@@ -249,6 +101,7 @@ export const getFileContentForAnalysis = async (
 
 /**
  * Gets full, unsummarized text content for indexing for the RAG system.
+ * Esta função permanece no frontend pois lida com a UI (updatePipelineStep).
  */
 export const getFullContentForIndexing = async (
     files: File[],
@@ -274,6 +127,21 @@ export const getFullContentForIndexing = async (
         }
     }
     return fullFileContents;
+};
+
+/**
+ * Simplificação da chamada à API Gemini através do BFF.
+ * A lógica de retry, queue e fallback foi removida e agora é responsabilidade do backend.
+ */
+const callGeminiProxy = async (
+    promptParts: (string | Part)[],
+    isJsonMode: boolean = true
+): Promise<GeminiApiResponse> => {
+    const payload = {
+        promptParts: promptParts.map(p => typeof p === 'string' ? { text: p } : p),
+        isJsonMode,
+    };
+    return callBffEndpoint<GeminiApiResponse>('/api/gemini', { method: 'POST', body: JSON.stringify(payload) });
 };
 
 
@@ -309,8 +177,8 @@ const generateSummaryForSingleFile = async (
     `;
 
     try {
-        const response = await enqueueGeminiCall(() => callGeminiWithRetry([prompt], logError, true));
-        return parseGeminiJsonResponse<any>(response.text, logError);
+        const response = await callGeminiProxy([prompt], true);
+        return JSON.parse(response.text);
     } catch (e) {
         logError({
             source: 'geminiService.mapStep',
@@ -399,8 +267,8 @@ export const generateReportFromFiles = async (
         `;
 
         try {
-            const response = await enqueueGeminiCall(() => callGeminiWithRetry([synthesisPrompt], logError, true));
-            const textualPart = parseGeminiJsonResponse<any>(response.text, logError);
+            const response = await callGeminiProxy([synthesisPrompt], true);
+            const textualPart = JSON.parse(response.text);
             
             // Combine aggregated numbers with AI-generated text
             const finalSummary: ExecutiveSummary = {
@@ -464,8 +332,8 @@ export const generateReportFromFiles = async (
     const promptParts = [{text: prompt}, {text: `\n\nCONTEÚDO DOS ARQUIVOS:\n${combinedContent}`}];
 
     try {
-        const response = await enqueueGeminiCall(() => callGeminiWithRetry(promptParts, logError, true));
-        const report = parseGeminiJsonResponse<{ executiveSummary: ExecutiveSummary }>(response.text, logError);
+        const response = await callGeminiProxy(promptParts, true);
+        const report = JSON.parse(response.text);
         
         if (!report || !report.executiveSummary || !report.executiveSummary.keyMetrics) {
             throw new Error("A estrutura do resumo executivo da IA é inválida ou incompleta.");
@@ -497,7 +365,7 @@ export const generateFullTextAnalysis = async (
 ): Promise<string> => {
      const startTime = performance.now();
      onProgress('Extraindo conteúdo dos arquivos...');
-     const fileContents = await getFileContentForAnalysis(files, () => {}, logError);
+     const fileContents = await getFileContentForAnalysis(files, onProgress, logError);
      const combinedContent = fileContents.map(f => f.content).join('\n\n');
      const totalTokens = estimateTokens(combinedContent);
 
@@ -513,7 +381,7 @@ export const generateFullTextAnalysis = async (
                 onProgress(`Analisando arquivo ${i + 1}/${fileContents.length}: ${file.fileName}`);
                 const chunkPrompt = `Você é um analista fiscal. Forneça uma análise textual detalhada, em markdown, do seguinte documento fiscal:\n\n${file.content}`;
                 try {
-                    const response = await enqueueGeminiCall(() => callGeminiWithRetry([chunkPrompt], logError, false));
+                    const response = await callGeminiProxy([chunkPrompt], false);
                     individualAnalyses.push(`## Análise do Arquivo: ${file.fileName}\n\n${response.text}`);
                 } catch (chunkError) {
                     logError({ source: 'geminiService.fullText', message: `Falha ao analisar o arquivo ${file.fileName}.`, severity: 'warning', details: chunkError });
@@ -536,7 +404,7 @@ export const generateFullTextAnalysis = async (
                 CONTEÚDO DOS ARQUIVOS:
                 ${combinedContent}
             `;
-            const response = await enqueueGeminiCall(() => callGeminiWithRetry([prompt], logError, false));
+            const response = await callGeminiProxy([prompt], false);
             const endTime = performance.now();
             logError({ source: 'geminiService.fullText', message: `Análise completa (unificada) concluída em ${(endTime - startTime).toFixed(2)} ms.`, severity: 'info' });
             return response.text;
@@ -583,12 +451,12 @@ export const simulateTaxScenario = async (
     const promptParts = [{ text: prompt }];
     
     try {
-        const response = await enqueueGeminiCall(() => callGeminiWithRetry(promptParts, logError, true));
-        const textualAnalysis = parseGeminiJsonResponse<{
+        const response = await callGeminiProxy(promptParts, true);
+        const textualAnalysis = JSON.parse(response.text) as {
             resumoExecutivo: string;
             recomendacaoPrincipal: string;
             recomendacoesPorCenario: { [key: string]: string[] };
-        }>(response.text, logError);
+        };
 
         if (!textualAnalysis || !textualAnalysis.recomendacoesPorCenario) {
             throw new Error("A estrutura da análise textual da simulação da IA é inválida.");
@@ -630,7 +498,7 @@ export const generateComparativeAnalysis = async (
 ): Promise<ComparativeAnalysisReport> => {
     const startTime = performance.now();
     onProgress('Extraindo conteúdo para comparação...');
-    const fileContents = await getFileContentForAnalysis(files, () => {}, logError);
+    const fileContents = await getFileContentForAnalysis(files, onProgress, logError);
     const combinedContent = fileContents.map(f => f.content).join('\n\n');
     const totalTokens = estimateTokens(combinedContent);
 
@@ -648,7 +516,7 @@ export const generateComparativeAnalysis = async (
                  onProgress(`Resumindo arquivo ${i + 1}/${fileContents.length}: ${file.fileName}`);
                  const chunkPrompt = `Você é um analista fiscal. Extraia as métricas e características chave do seguinte documento em formato JSON. Inclua totais, impostos, e datas. Seja conciso.\n\n${file.content}`;
                  try {
-                    const response = await enqueueGeminiCall(() => callGeminiWithRetry([chunkPrompt], logError, false));
+                    const response = await callGeminiProxy([chunkPrompt], false);
                     individualSummaries.push(`--- RESUMO DO ARQUIVO: ${file.fileName} ---\n${response.text}`);
                  } catch (chunkError) {
                     logError({ source: 'geminiService.compare', message: `Falha ao resumir o arquivo ${file.fileName} para comparação.`, severity: 'warning', details: chunkError });
@@ -669,8 +537,8 @@ export const generateComparativeAnalysis = async (
                 RESUMOS DOS ARQUIVOS:
                 ${individualSummaries.join('\n\n')}
             `;
-             const finalResponse = await enqueueGeminiCall(() => callGeminiWithRetry([synthesisPrompt], logError, true));
-             analysisResult = parseGeminiJsonResponse<ComparativeAnalysisReport>(finalResponse.text, logError);
+             const finalResponse = await callGeminiProxy([synthesisPrompt], true);
+             analysisResult = JSON.parse(finalResponse.text);
 
         } else {
             const prompt = `
@@ -688,8 +556,8 @@ export const generateComparativeAnalysis = async (
                 CONTEÚDO DOS ARQUIVOS:
                 ${combinedContent}
             `;
-            const response = await enqueueGeminiCall(() => callGeminiWithRetry([prompt], logError, true));
-            analysisResult = parseGeminiJsonResponse<ComparativeAnalysisReport>(response.text, logError);
+            const response = await callGeminiProxy([prompt], true);
+            analysisResult = JSON.parse(response.text);
         }
 
         if (!analysisResult || !analysisResult.keyComparisons) {
@@ -756,7 +624,7 @@ export const getChatCompletion = async (
     logError: (error: Omit<LogError, 'timestamp'>) => void
 ): Promise<string> => {
     try {
-        const response = await enqueueGeminiCall(() => callGeminiWithRetry([prompt], logError, false));
+        const response = await callGeminiProxy([prompt], false);
         return response.text;
     } catch(err) {
         logError({

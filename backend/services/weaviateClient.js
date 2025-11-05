@@ -1,5 +1,6 @@
 // backend/services/weaviateClient.js
-const weaviate = require('weaviate-ts-client');
+const weaviateModule = require('weaviate-ts-client');
+const weaviate = weaviateModule.default ?? weaviateModule;
 
 const client = weaviate.client({
     scheme: 'http',
