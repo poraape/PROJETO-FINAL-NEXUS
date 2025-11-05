@@ -1,18 +1,13 @@
 import React, { useState, useCallback, useEffect } from 'react';
-import JSZip from 'jszip';
 import { Header } from './components/Header.tsx';
 import { FileUpload } from './components/FileUpload.tsx';
 import { PipelineTracker } from './components/PipelineTracker.tsx';
 import { Dashboard } from './components/dashboard/Dashboard.tsx';
 import { ErrorLogModal } from './components/ErrorLogModal.tsx';
 import { INITIAL_PIPELINE_STEPS } from './constants.ts';
-import { generateReportFromFiles, getFileContentForAnalysis, getFullContentForIndexing } from './services/geminiService.ts';
 import { GeneratedReport, PipelineStep, ProcessingStepStatus, Theme } from './types.ts';
 import { useErrorLog } from './hooks/useErrorLog.ts';
-import { clearContext, getLastReportSummary, storeLastReportSummary, createAndStoreIndex, storeForecast } from './services/contextMemory.ts';
-import { extrairDadosParaExportacao } from './services/exporter.ts';
-import { classificarNotas } from './services/classifier.ts';
-import { calcularPrevisoes } from './services/forecast.ts';
+import { clearContext, getLastReportSummary } from './services/contextMemory.ts';
 import { iniciarAuditoriaAutomatica } from './services/auditorAgent.ts';
 
 type View = 'upload' | 'processing' | 'dashboard';
@@ -71,175 +66,74 @@ function App() {
     setGeneratedReport(null);
     setProcessedFiles([]);
     setPipelineSteps(INITIAL_PIPELINE_STEPS);
+    setProcessedFiles(files);
 
-    const MAX_FILE_SIZE = 10 * 1024 * 1024;
-    const validFiles: File[] = [];
-    let oversizedFiles: string[] = [];
-    const errorMessages: string[] = [];
-    
-    for (const file of files) {
-        if (file.size > MAX_FILE_SIZE) {
-            oversizedFiles.push(file.name);
-        } else {
-            validFiles.push(file);
-        }
-    }
-
-    if (oversizedFiles.length > 0) {
-        const oversizedMsg = `Os seguintes arquivos são muito grandes (limite de 10MB) e não serão processados: ${oversizedFiles.join(', ')}`;
-        errorMessages.push(oversizedMsg);
-        logError({
-            source: 'FileUpload',
-            message: `Arquivos excedem o limite de 10MB: ${oversizedFiles.join(', ')}`,
-            severity: 'warning'
-        });
-    }
-
-    if (validFiles.length === 0) {
-        setError(errorMessages.length > 0 ? errorMessages.join('\n') : "Nenhum arquivo válido para processar. Verifique o tamanho dos arquivos.");
-        setView('upload');
-        return;
-    }
-
-    let currentProcessedFiles: File[] = [];
+    const formData = new FormData();
+    files.forEach(file => {
+      formData.append('files', file);
+    });
 
     try {
-      setUploadInfo('Preparando arquivos para análise...');
-      const fileProcessingPromises = validFiles.map(async (file) => {
-        if (file.name.toLowerCase().endsWith('.zip')) {
-          try {
-            const zip = await JSZip.loadAsync(file);
-            const extractedFilePromises: Promise<File | null>[] = [];
-            
-            zip.forEach((_, zipEntry) => {
-              if (!zipEntry.dir) {
-                const promise = zipEntry.async('blob').then(blob => {
-                  const extractedFile = new File([blob], zipEntry.name, { type: blob.type });
-                  if (extractedFile.size > MAX_FILE_SIZE) {
-                      oversizedFiles.push(`(do zip) ${extractedFile.name}`);
-                      return null;
-                  }
-                  return extractedFile;
-                });
-                extractedFilePromises.push(promise);
-              }
-            });
-            
-            const extractedFiles = await Promise.all(extractedFilePromises);
-            return extractedFiles.filter((f): f is File => f !== null);
-
-          } catch (zipError) {
-              console.error(`Error unzipping ${file.name}:`, zipError);
-              throw new Error(`Falha ao descompactar o arquivo '${file.name}'. O arquivo pode estar corrompido ou em um formato de zip não suportado.`);
-          }
-        } else {
-          return Promise.resolve([file]);
-        }
+      // 1. Inicia o job no backend
+      const response = await fetch('/api/jobs', {
+        method: 'POST',
+        body: formData,
       });
 
-      const nestedFilesArray = await Promise.all(fileProcessingPromises);
-      currentProcessedFiles = nestedFilesArray.flat();
-      setProcessedFiles(currentProcessedFiles);
-       
-      if (oversizedFiles.length > 0) {
-          const oversizedMsg = `Arquivos grandes (limite de 10MB) ignorados: ${oversizedFiles.join(', ')}`;
-          setError(oversizedMsg);
-          logError({
-            source: 'FileUpload',
-            message: `Arquivos extraídos excedem o limite de 10MB: ${oversizedFiles.join(', ')}`,
-            severity: 'warning'
-        });
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.message || 'Falha ao iniciar o job de processamento.');
       }
 
-      if (currentProcessedFiles.length === 0) {
-        let finalError = 'Nenhum arquivo válido encontrado para análise.';
-        if(oversizedFiles.length > 0) {
-            finalError += ` ${oversizedFiles.length} arquivo(s) foram ignorados por excederem o limite de tamanho.`
-        } else if (files.some(f => f.name.toLowerCase().endsWith('.zip'))) {
-            finalError += ' O arquivo .zip pode estar vazio ou conter apenas pastas.'
+      const { jobId } = await response.json();
+      setUploadInfo(`Job ${jobId} iniciado. Acompanhando progresso...`);
+
+      // 2. Conecta via WebSocket para receber atualizações em tempo real
+      // O servidor de desenvolvimento do React geralmente roda em uma porta diferente (ex: 5173)
+      // do nosso backend (3001). Em produção, eles estariam no mesmo host.
+      const wsHost = window.location.hostname === 'localhost' ? 'localhost:3001' : window.location.host;
+      const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const ws = new WebSocket(`${wsProtocol}//${wsHost}?jobId=${jobId}`);
+
+      ws.onmessage = (event) => {
+        const jobStatus = JSON.parse(event.data);
+        setPipelineSteps(jobStatus.pipeline);
+
+        if (jobStatus.status === 'completed') {
+          setGeneratedReport(jobStatus.result);
+          setView('dashboard');
+          ws.close();
+        } else if (jobStatus.status === 'failed') {
+          throw new Error(jobStatus.error || 'O job de processamento falhou no backend.');
         }
-        throw new Error(finalError);
-      }
-      
-      setUploadInfo(`Analisando ${currentProcessedFiles.length} arquivo(s)...`);
-      
-      updatePipelineStep(0, ProcessingStepStatus.IN_PROGRESS, "Extraindo dados estruturados...");
-      const { documentos } = await extrairDadosParaExportacao(currentProcessedFiles);
-      
-      try {
-          logError({ source: 'Forecast', message: 'Calculando previsões...', severity: 'info' });
-          const forecast = calcularPrevisoes(documentos);
-          if (forecast) {
-              storeForecast(forecast);
-              logError({ source: 'Forecast', message: 'Previsões calculadas e armazenadas.', severity: 'info' });
-          }
-      } catch (err) {
-          logError({ source: 'Forecast', message: 'Falha no cálculo das previsões.', severity: 'warning', details: err });
-      }
+      };
 
-      const fileContentsForAnalysis = await getFileContentForAnalysis(currentProcessedFiles, updatePipelineStep, logError);
-      updatePipelineStep(0, ProcessingStepStatus.COMPLETED);
+      ws.onerror = (event) => {
+        console.error("WebSocket error:", event);
+        setError("Erro de comunicação com o servidor. Tente novamente.");
+        setView('upload');
+      };
 
-      updatePipelineStep(1, ProcessingStepStatus.IN_PROGRESS, "Ag. Auditor: Verificando consistência...");
-      await new Promise(res => setTimeout(res, 300));
-      updatePipelineStep(1, ProcessingStepStatus.COMPLETED);
-
-      updatePipelineStep(2, ProcessingStepStatus.IN_PROGRESS, "Ag. Classificador: Organizando informações...");
-      const classifications = await classificarNotas(documentos, logError);
-      updatePipelineStep(2, ProcessingStepStatus.COMPLETED);
-
-      updatePipelineStep(3, ProcessingStepStatus.IN_PROGRESS, "Ag. Inteligência: Gerando análise executiva...");
-      const executiveSummary = await generateReportFromFiles(fileContentsForAnalysis, classifications, logError);
-      updatePipelineStep(3, ProcessingStepStatus.COMPLETED);
-      
-      storeLastReportSummary(executiveSummary);
-
-      try {
-          updatePipelineStep(4, ProcessingStepStatus.IN_PROGRESS, "Ag. Contador: Indexando conteúdo para chat...");
-          const indexingContents = await getFullContentForIndexing(currentProcessedFiles, logError);
-          createAndStoreIndex(indexingContents);
-          updatePipelineStep(4, ProcessingStepStatus.COMPLETED, "Indexação concluída!");
-      } catch (err) {
-          logError({ source: 'App.Indexing', message: 'Falha ao indexar conteúdo para o chat. O chat pode não ter contexto.', severity: 'warning', details: err });
-           updatePipelineStep(4, ProcessingStepStatus.COMPLETED, "Indexação com avisos.");
-      }
-
-      const initialReport: GeneratedReport = { executiveSummary, fullTextAnalysis: undefined };
-      setGeneratedReport(initialReport);
-      setView('dashboard');
+      ws.onclose = (event) => {
+        console.log("WebSocket connection closed:", event.reason);
+        // Se a conexão fechar inesperadamente antes do job terminar
+        if (view === 'processing') {
+            setError("A conexão com o servidor foi perdida.");
+            setView('upload');
+        }
+      };
 
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'An unknown error occurred.';
-      let displayError = errorMessage;
-      const isApiKeyError = errorMessage.toLowerCase().includes("api key") || errorMessage.toLowerCase().includes("api_key") || errorMessage.includes("400");
-
-      if (isApiKeyError) {
-        displayError = 'A chave de API configurada na aplicação é inválida. Por favor, contate o administrador.';
-        logError({
-            source: 'GeminiService',
-            message: 'A chave de API embutida é inválida.',
-            severity: 'critical',
-            details: err,
-        });
-      }
-
-      setError(prev => prev ? `${prev}\n${displayError}` : displayError);
+      const errorMessage = err instanceof Error ? err.message : 'Ocorreu um erro desconhecido.';
+      setError(errorMessage);
       logError({
-          source: 'FileUpload',
-          message: errorMessage,
-          severity: 'critical',
-          details: err instanceof Error ? err.stack : JSON.stringify(err)
+        source: 'JobSubmission',
+        message: errorMessage,
+        severity: 'critical',
+        details: err instanceof Error ? err.stack : JSON.stringify(err),
       });
-      
-      const currentStepIndex = pipelineSteps.findIndex(s => s.status === ProcessingStepStatus.IN_PROGRESS);
-      if (currentStepIndex !== -1) {
-        updatePipelineStep(currentStepIndex, ProcessingStepStatus.FAILED);
-      } else {
-        updatePipelineStep(0, ProcessingStepStatus.FAILED);
-      }
-      
+      updatePipelineStep(0, ProcessingStepStatus.FAILED);
       setView('upload');
-      console.error("Failed to process files or generate report:", err);
     }
   };
 
@@ -273,7 +167,7 @@ function App() {
       case 'processing':
          return (
           <div className={commonWrapperClasses}>
-            <PipelineTracker steps={pipelineSteps} />
+            <PipelineTracker steps={pipelineSteps} uploadInfo={uploadInfo} />
             {error && <p className="text-red-400 mt-4 text-center max-w-2xl whitespace-pre-wrap bg-red-500/10 p-3 rounded-lg">{error}</p>}
           </div>
         );

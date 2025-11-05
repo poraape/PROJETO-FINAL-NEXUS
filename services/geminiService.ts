@@ -1,7 +1,6 @@
 // Fix: Implementing the Gemini service to handle API calls for report generation and analysis.
 import { Part } from '@google/genai';
 import {
-  ExecutiveSummary,
   ProcessingStepStatus,
   SimulationParams,
   SimulationResult,
@@ -10,6 +9,7 @@ import {
   GeneratedReport,
   TaxScenario,
   ClassificationResult,
+  ExecutiveSummary,
 } from '../types';
 import { parseFile, extractFullTextFromFile } from './fileParsers.ts';
 import { GEMINI_API_KEY } from '../config.ts';
@@ -91,82 +91,38 @@ interface GeminiApiResponse {
   json: () => any;
 }
 
-
 /**
- * Makes a single API call, trying a proxy first and falling back to the direct API.
- * This function does not handle retries, only the proxy/fallback logic.
+ * Faz uma chamada para o nosso BFF, que atuará como um proxy seguro para a API Gemini.
+ * A lógica de fallback e retries agora é responsabilidade do backend.
  */
 const _callGeminiApiOnce = async (
     parts: Part[],
     isJsonMode: boolean
 ): Promise<GeminiApiResponse> => {
-    const model = DEFAULT_MODEL;
     const payload = {
-        contents: [{ parts: parts }],
-        ...(isJsonMode && { generationConfig: { responseMimeType: 'application/json' } })
+        promptParts: parts,
+        isJsonMode: isJsonMode,
     };
 
-    // Pre-flight check for the embedded key
-    if (!GEMINI_API_KEY || GEMINI_API_KEY.length < 20) {
-      throw new Error("API Key ausente ou inválida — verifique o config.ts");
-    }
-
-    // 1. Try Proxy
     try {
-        console.debug(`[GeminiService] Attempting API call via proxy...`);
-        const proxyResponse = await fetch(`${GEMINI_PROXY_URL}/${model}:generateContent`, {
+        const response = await fetch(BFF_API_URL, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload),
         });
 
-        if (!proxyResponse.ok) {
-            throw new Error(`Proxy error status: ${proxyResponse.status} ${proxyResponse.statusText}`);
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ message: response.statusText }));
+            throw new Error(`Erro no BFF: ${response.status} - ${errorData.message || 'Erro desconhecido'}`);
         }
         
-        const proxyData = await proxyResponse.json();
-        
-        if (proxyData.error) {
-            throw new Error(`Proxy response error: ${proxyData.error.message}`);
-        }
-
-        const responseText = proxyData.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-        return { ...proxyData, text: responseText, json: () => proxyData };
-
+        const data = await response.json();
+        const responseText = data.text ?? '';
+        return { ...data, text: responseText, json: () => data.json() };
     } catch (error) {
-        console.warn("[GeminiService] Proxying failed. Falling back to direct API.", error);
-
-        // 2. Fallback to Direct API
-        try {
-            console.debug("[GeminiService] Using secure embedded API key for fallback.");
-
-            const directResponse = await fetch(
-                `${GEMINI_DIRECT_URL}/${model}:generateContent?key=${GEMINI_API_KEY}`,
-                {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(payload),
-                }
-            );
-
-            const directData = await directResponse.json();
-
-            if (!directResponse.ok) {
-                const apiErrorMsg = directData?.error?.message || 'Unknown direct API error';
-                throw new Error(`Direct API error: ${directResponse.status} - ${apiErrorMsg}`);
-            }
-             if (directData.error) {
-                throw new Error(`Direct API response error: ${directData.error.message}`);
-            }
-
-            console.debug("[GeminiService] Direct fallback successful.");
-            const responseText = directData.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-            return { ...directData, text: responseText, json: () => directData };
-
-        } catch (fallbackError) {
-            console.error("[GeminiService] Direct API fallback also failed:", fallbackError);
-            throw new Error(`Falha total ao se comunicar com a API Gemini. Erro: ${fallbackError.message}`);
-        }
+        console.error("[GeminiService] Falha na chamada ao BFF:", error);
+        // O erro já vem formatado do BFF ou da falha de fetch.
+        throw error;
     }
 };
 
@@ -193,7 +149,7 @@ export const callGeminiWithRetry = async (
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         const startTime = performance.now();
-        try {
+        try { // A lógica de retry agora é mais simples, pois o BFF abstrai a complexidade.
             console.log(`DEBUG: Chamada da API Gemini (tentativa ${attempt}/${MAX_RETRIES}). Tamanho do payload: ${JSON.stringify(mutableParts).length} caracteres.`);
             
             const response = await _callGeminiApiOnce(mutableParts, isJsonMode);
@@ -214,10 +170,7 @@ export const callGeminiWithRetry = async (
             lastError = error;
             const errorMessage = error.toString().toLowerCase();
             // Retriable errors are server-side issues or rate limiting.
-            const isRetriableError = errorMessage.includes('500') || 
-                                     errorMessage.includes('internal error') || 
-                                     errorMessage.includes('429') || 
-                                     errorMessage.includes('proxy');
+            const isRetriableError = errorMessage.includes('500') || errorMessage.includes('429') || errorMessage.includes('bff');
             
             if (isRetriableError && attempt < MAX_RETRIES) {
                 // Exponential backoff with jitter

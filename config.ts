@@ -1,11 +1,9 @@
 // config.ts
 
-// Chave protegida e ofuscada para ser embutida no código.
-// Substitua o valor pela sua chave real codificada em Base64. Ex: btoa("AIza...")
-const _obfKey = "QUl6YVN5bFZ5QkV4LWNoYXZlX0tleQ=="; // Placeholder as per instructions
-
 /**
- * A chave de API decodificada do Google Gemini.
- * Esta é a única fonte de verdade para autenticação na aplicação.
+ * A chave de API do Google Gemini foi movida para o backend por segurança.
+ * O frontend não terá mais acesso direto a ela.
+ * Todas as chamadas para a IA serão intermediadas pelo nosso novo BFF (Backend-for-Frontend).
+ * @deprecated A chave de API não deve ser exposta no cliente.
  */
-export const GEMINI_API_KEY = typeof window !== 'undefined' ? window.atob(_obfKey) : '';
+export const GEMINI_API_KEY = "MOVED_TO_BACKEND";
