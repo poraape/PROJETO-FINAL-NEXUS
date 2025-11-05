@@ -1,0 +1,29 @@
+# backend/pipeline.yaml
+# Define o fluxo de trabalho do sistema de agentes.
+# Cada chave é o nome de uma tarefa (agente).
+# 'next' aponta para a próxima tarefa a ser executada.
+# 'stepIndex' corresponde ao índice no array de pipeline da UI.
+
+extraction:
+  next: validation
+  stepIndex: 0
+
+validation:
+  next: audit
+  stepIndex: 1 # This will now map to the "Ag. Auditor" step in the UI
+
+audit:
+  next: classification
+  stepIndex: 1
+
+classification:
+  next: analysis
+  stepIndex: 2
+
+analysis:
+  next: indexing
+  stepIndex: 3
+
+indexing:
+  next: null # Marca o fim do pipeline
+  stepIndex: 4
