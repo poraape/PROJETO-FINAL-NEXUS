@@ -20,6 +20,15 @@ const formatCurrency = (value: number) => {
 };
 
 export const ExecutiveAnalysis: React.FC<ExecutiveAnalysisProps> = ({ summary }) => {
+  if (!summary || !summary.keyMetrics) {
+    return (
+      <div className="bg-bg-secondary backdrop-blur-xl rounded-3xl border border-border-glass shadow-glass p-6 h-full">
+        <h2 className="text-2xl font-bold text-content-emphasis">Análise Executiva</h2>
+        <p className="text-content-default">Dados indisponíveis ou em processamento.</p>
+      </div>
+    );
+  }
+
   const insights = [
     ...(summary.actionableInsights || []),
     { text: "O 'Índice de Conformidade de ICMS' elevado sugere processos fiscais robustos, mas a monitoria contínua é crucial." },
@@ -40,12 +49,12 @@ export const ExecutiveAnalysis: React.FC<ExecutiveAnalysisProps> = ({ summary })
 
       <h3 className="text-lg font-semibold text-content-emphasis mb-4">Métricas Chave</h3>
       <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mb-6">
-        <MetricCard title="Documentos Válidos" value={summary.keyMetrics.numeroDeDocumentosValidos.toString()} />
-        <MetricCard title="Valor Total NF-e" value={formatCurrency(summary.keyMetrics.valorTotalDasNfes)} />
-        <MetricCard title="Valor Total Produtos" value={formatCurrency(summary.keyMetrics.valorTotalDosProdutos)} />
-        <MetricCard title="Índice Conformidade ICMS" value={summary.keyMetrics.indiceDeConformidadeICMS} isAlert={parseFloat(summary.keyMetrics.indiceDeConformidadeICMS.replace('%', '')) < 99} />
-        <MetricCard title="Nível Risco Tributário" value={summary.keyMetrics.nivelDeRiscoTributario} isAlert={summary.keyMetrics.nivelDeRiscoTributario !== 'Baixo'}/>
-        <MetricCard title="Estimativa NVA" value={formatCurrency(summary.keyMetrics.estimativaDeNVA)} description="Necessidade de Verba" />
+        <MetricCard title="Documentos Válidos" value={(summary.keyMetrics.numeroDeDocumentosValidos || 0).toString()} />
+        <MetricCard title="Valor Total NF-e" value={formatCurrency(summary.keyMetrics.valorTotalDasNfes || 0)} />
+        <MetricCard title="Valor Total Produtos" value={formatCurrency(summary.keyMetrics.valorTotalDosProdutos || 0)} />
+        <MetricCard title="Índice Conformidade ICMS" value={summary.keyMetrics.indiceDeConformidadeICMS || 'N/A'} isAlert={parseFloat((summary.keyMetrics.indiceDeConformidadeICMS || '100%').replace('%', '')) < 99} />
+        <MetricCard title="Nível Risco Tributário" value={summary.keyMetrics.nivelDeRiscoTributario || 'N/A'} isAlert={(summary.keyMetrics.nivelDeRiscoTributario || 'Baixo') !== 'Baixo'}/>
+        <MetricCard title="Estimativa NVA" value={formatCurrency(summary.keyMetrics.estimativaDeNVA || 0)} description="Necessidade de Verba" />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
