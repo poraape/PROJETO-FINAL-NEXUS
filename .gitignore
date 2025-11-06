@@ -31,3 +31,4 @@ weaviate_data/
 # Arquivos de Sistema Operacional
 .DS_Store
 Thumbs.db
+backend/.env

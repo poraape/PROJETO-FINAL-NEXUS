@@ -18,7 +18,16 @@ const app = express();
 const server = http.createServer(app);
 const port = process.env.PORT || 3001; // Porta padrão 3001
 
-const upload = multer({ storage: multer.memoryStorage() });
+const MAX_FILE_SIZE_MB = parseInt(process.env.UPLOAD_MAX_FILE_SIZE_MB || '50', 10);
+const MAX_FILES_PER_JOB = parseInt(process.env.UPLOAD_MAX_FILES || '20', 10);
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: MAX_FILE_SIZE_MB * 1024 * 1024,
+    files: MAX_FILES_PER_JOB,
+  },
+});
 
 // --- Configuração de Segurança e Middlewares ---
 app.use(cors()); // Em produção, restrinja para o domínio do seu frontend
@@ -90,6 +99,25 @@ const registerRoutes = require('./routes');
 registerRoutes(app, sharedContext);
 
 registerAgents(sharedContext); // Registra os listeners dos agentes
+
+// Middleware de tratamento de erros globais (upload e demais)
+app.use((err, req, res, next) => {
+    if (err instanceof multer.MulterError) {
+        console.error('[Upload] Erro no envio de arquivos:', err);
+        let message = err.message;
+        if (err.code === 'LIMIT_FILE_SIZE') {
+            message = `O tamanho máximo por arquivo (${MAX_FILE_SIZE_MB} MB) foi excedido.`;
+        } else if (err.code === 'LIMIT_FILE_COUNT') {
+            message = `Número máximo de arquivos por envio (${MAX_FILES_PER_JOB}) excedido.`;
+        }
+        return res.status(400).json({ message });
+    }
+    if (err) {
+        console.error('[Server] Erro não tratado:', err);
+        return res.status(500).json({ message: 'Erro interno do servidor.' });
+    }
+    return next();
+});
 
 // --- Funções de Suporte ao Pipeline (usadas pelos agentes e rotas) ---
 

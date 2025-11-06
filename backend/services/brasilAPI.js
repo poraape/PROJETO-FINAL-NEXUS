@@ -11,8 +11,23 @@ async function getCnpjData(cnpj) {
     try {
         const response = await fetch(`${BASE_URL}/cnpj/v1/${cnpj}`);
         if (!response.ok) {
-            const errorData = await response.json();
-            throw new Error(`BrasilAPI error for CNPJ ${cnpj}: ${errorData.message}`);
+            const contentType = response.headers.get('content-type') || '';
+            let errorDetail = response.statusText;
+            if (contentType.includes('application/json')) {
+                try {
+                    const errorData = await response.json();
+                    errorDetail = errorData?.message || errorDetail;
+                } catch {
+                    // ignore, fall back to status text
+                }
+            } else {
+                try {
+                    errorDetail = (await response.text()).trim() || errorDetail;
+                } catch {
+                    // ignore
+                }
+            }
+            throw new Error(`BrasilAPI error for CNPJ ${cnpj}: ${response.status} ${errorDetail}`);
         }
         return await response.json();
     } catch (error) {

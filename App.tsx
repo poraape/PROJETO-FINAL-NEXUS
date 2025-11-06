@@ -9,6 +9,7 @@ import { GeneratedReport, PipelineStep, ProcessingStepStatus, Theme } from './ty
 import { useErrorLog } from './hooks/useErrorLog.ts';
 import { clearContext, getLastReportSummary } from './services/contextMemory.ts';
 import { iniciarAuditoriaAutomatica } from './services/auditorAgent.ts';
+import { BFF_API_URL } from './config.ts';
 
 type View = 'upload' | 'processing' | 'dashboard';
 
@@ -91,9 +92,11 @@ function App() {
       // 2. Conecta via WebSocket para receber atualizações em tempo real
       // O servidor de desenvolvimento do React geralmente roda em uma porta diferente (ex: 5173)
       // do nosso backend (3001). Em produção, eles estariam no mesmo host.
-      const wsHost = window.location.hostname === 'localhost' ? 'localhost:3001' : window.location.host;
-      const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const backendUrl = new URL(BFF_API_URL);
+      const wsProtocol = backendUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsHost = backendUrl.host;
       const ws = new WebSocket(`${wsProtocol}//${wsHost}?jobId=${jobId}`);
+      let jobFinalized = false;
 
       ws.onmessage = (event) => {
         const jobStatus = JSON.parse(event.data);
@@ -102,8 +105,11 @@ function App() {
         if (jobStatus.status === 'completed') {
           setGeneratedReport(jobStatus.result);
           setView('dashboard');
+          jobFinalized = true;
           ws.close();
         } else if (jobStatus.status === 'failed') {
+          jobFinalized = true;
+          ws.close();
           throw new Error(jobStatus.error || 'O job de processamento falhou no backend.');
         }
       };
@@ -117,7 +123,7 @@ function App() {
       ws.onclose = (event) => {
         console.log("WebSocket connection closed:", event.reason);
         // Se a conexão fechar inesperadamente antes do job terminar
-        if (view === 'processing') {
+        if (!jobFinalized) {
             setError("A conexão com o servidor foi perdida.");
             setView('upload');
         }
