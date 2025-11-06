@@ -9,7 +9,7 @@ import { GeneratedReport, PipelineStep, ProcessingStepStatus, Theme } from './ty
 import { useErrorLog } from './hooks/useErrorLog.ts';
 import { clearContext, getLastReportSummary } from './services/contextMemory.ts';
 import { iniciarAuditoriaAutomatica } from './services/auditorAgent.ts';
-import { BFF_API_URL } from './config.ts';
+import { buildBackendHttpUrl, buildBackendWsUrl } from './config.ts';
 
 type View = 'upload' | 'processing' | 'dashboard';
 
@@ -76,7 +76,7 @@ function App() {
 
     try {
       // 1. Inicia o job no backend
-      const response = await fetch('/api/jobs', {
+      const response = await fetch(buildBackendHttpUrl('/api/jobs'), {
         method: 'POST',
         body: formData,
       });
@@ -92,10 +92,8 @@ function App() {
       // 2. Conecta via WebSocket para receber atualizações em tempo real
       // O servidor de desenvolvimento do React geralmente roda em uma porta diferente (ex: 5173)
       // do nosso backend (3001). Em produção, eles estariam no mesmo host.
-      const backendUrl = new URL(BFF_API_URL);
-      const wsProtocol = backendUrl.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsHost = backendUrl.host;
-      const ws = new WebSocket(`${wsProtocol}//${wsHost}?jobId=${jobId}`);
+      const wsUrl = buildBackendWsUrl('/', { jobId });
+      const ws = new WebSocket(wsUrl);
       let jobFinalized = false;
 
       ws.onmessage = (event) => {

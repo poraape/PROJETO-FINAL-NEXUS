@@ -129,7 +129,7 @@ echo -e "\n${YELLOW}▶️  Iniciando o servidor do Frontend (Vite Dev Server)..
 echo -e "\n${GREEN}🎉 Ambiente pronto! Acesse a aplicação em: http://localhost:8000${NC}"
 echo -e "(Pressione ${YELLOW}Ctrl+C${NC} para finalizar todos os processos)"
 
-npm run dev -- --host 0.0.0.0 --port 8000 >/dev/null 2>&1 &
+npm run dev -- --host 0.0.0.0 --port 8000 --strictPort >/dev/null 2>&1 &
 FRONTEND_PID=$!
 
 wait # Espera por Ctrl+C para chamar a função cleanup

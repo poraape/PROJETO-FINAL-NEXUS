@@ -1,6 +1,6 @@
 // services/chatService.ts
 import { ChartConfig, ForecastResult, GeneratedReport, LogError } from '../types.ts';
-import { BFF_API_URL } from '../config.ts';
+import { buildBackendHttpUrl } from '../config.ts';
 import {
     getAnswer as getCachedAnswer,
     storeAnswer as cacheAnswer,
@@ -35,7 +35,7 @@ export async function getAnswerFromBackend(
     logError: LogFn
 ): Promise<string> {
     try {
-        const response = await fetch(`${BFF_API_URL}/api/jobs/${jobId}/chat`, {
+        const response = await fetch(buildBackendHttpUrl(`/api/jobs/${jobId}/chat`), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ question }),
@@ -285,7 +285,7 @@ async function callGeminiApi(
     };
 
     try {
-        const response = await fetch(`${BFF_API_URL}/api/gemini`, {
+        const response = await fetch(buildBackendHttpUrl('/api/gemini'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),

@@ -9,7 +9,7 @@ import {
   ExecutiveSummary,
 } from '../types';
 import { parseFile, extractFullTextFromFile } from './fileParsers.ts';
-import { BFF_API_URL } from '../config.ts';
+import { buildBackendHttpUrl } from '../config.ts';
 
 const CHUNK_TOKEN_THRESHOLD = 7000; // ≈ 28,000 characters
 
@@ -36,7 +36,7 @@ const callBffEndpoint = async <T>(
     options: RequestInit = {}
 ): Promise<T> => {
     try {
-        const response = await fetch(`${BFF_API_URL}${endpoint}`, {
+        const response = await fetch(buildBackendHttpUrl(endpoint), {
             ...options,
             headers: {
                 'Content-Type': 'application/json',
