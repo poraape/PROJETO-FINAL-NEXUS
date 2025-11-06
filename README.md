@@ -146,7 +146,6 @@ a. **Torne o script executável (apenas na primeira vez):**
 
 b. **Execute o script:**
     ```bash
-    ./start-dev.sh
     ```
 
 O script irá:
@@ -156,7 +155,8 @@ O script irá:
 4.  Iniciar o servidor do frontend.
 5.  Acesse a aplicação em `http://localhost:8000`.
 
-### 2. Execução Manual (Passo a Passo)
+### 2.     ./start-dev.sh
+Execução Manual (Passo a Passo)
 
 a. **Configure as variáveis de ambiente:**
    - Crie um arquivo `.env` na pasta `backend`.
