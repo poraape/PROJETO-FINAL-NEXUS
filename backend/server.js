@@ -267,6 +267,16 @@ async function processFilesInBackground(jobId, filesMeta) {
 // --- AGENTE ORQUESTRADOR ---
 // O cérebro do sistema. Ele decide qual tarefa executar a seguir.
 
+// Carrega a definição do pipeline a partir do arquivo YAML na inicialização.
+let pipelineDefinition;
+try {
+  pipelineDefinition = yaml.load(fs.readFileSync(path.join(__dirname, 'pipeline.yaml'), 'utf8'));
+  logger.info('[Orquestrador] Definição do pipeline carregada com sucesso.');
+} catch (e) {
+  logger.fatal('ERRO CRÍTICO: Não foi possível carregar o arquivo pipeline.yaml.', { error: e });
+  process.exit(1);
+}
+
 eventBus.on('orchestrator:start', ({ jobId, payload }) => {
     const firstTask = Object.keys(pipelineDefinition)[0];
     logger.info(`[Orquestrador] Job ${jobId}: Iniciando pipeline com a tarefa '${firstTask}'.`);
