@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { GeneratedReport, SimulationResult, ComparativeAnalysisReport, LogError } from '../../types.ts';
 import { ExecutiveAnalysis } from './ExecutiveAnalysis.tsx';
 import { InteractiveChat } from './InteractiveChat.tsx';
@@ -7,6 +7,7 @@ import { PaperIcon } from '../icons/PaperIcon.tsx';
 import { CalculatorIcon } from '../icons/CalculatorIcon.tsx';
 import { FileTextIcon } from '../icons/FileTextIcon.tsx';
 import { FullTextAnalysis } from './FullTextAnalysis.tsx';
+import { AuditInsightsPanel } from './AuditInsightsPanel.tsx';
 import { CompareIcon } from '../icons/CompareIcon.tsx';
 import { ComparativeAnalysis } from './ComparativeAnalysis.tsx';
 import { generateComparativeAnalysis } from '../../services/geminiService.ts';
@@ -30,6 +31,9 @@ type DashboardView = 'analysis' | 'simulator' | 'fullText' | 'comparison';
  */
 export const Dashboard: React.FC<DashboardProps> = ({ initialReport, processedFiles, onAnalyzeOther, logError, jobId }) => {
   const [report, setReport] = useState<GeneratedReport>(initialReport);
+  useEffect(() => {
+    setReport(initialReport);
+  }, [initialReport]);
   const [view, setView] = useState<DashboardView>('analysis');
   const [simulationResult, setSimulationResult] = useState<SimulationResult | null>(null);
   
@@ -125,10 +129,17 @@ export const Dashboard: React.FC<DashboardProps> = ({ initialReport, processedFi
                 />
             )}
         </div>
-        <div className="lg:col-span-2">
-            <InteractiveChat 
-              report={report} 
-              simulationResult={simulationResult} 
+        <div className="lg:col-span-2 space-y-6">
+            {report.auditFindings && (
+              <AuditInsightsPanel
+                audit={report.auditFindings}
+                classifications={report.classifications}
+                fiscalChecks={report.fiscalChecks}
+              />
+            )}
+            <InteractiveChat
+              report={report}
+              simulationResult={simulationResult}
               processedFiles={processedFiles}
               jobId={jobId || undefined}
             />
