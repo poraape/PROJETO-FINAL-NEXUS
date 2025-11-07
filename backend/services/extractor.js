@@ -5,6 +5,8 @@ const mammoth = require('mammoth');
 const xlsx = require('xlsx');
 const { parse: parseCsv } = require('csv-parse/sync');
 const crypto = require('crypto');
+const artifactCache = require('./artifactCache');
+const dataGovernance = require('./dataGovernance');
 
 const TEXT_ENCODINGS = ['utf8', 'latin1', 'base64'];
 
@@ -141,16 +143,17 @@ async function buildArtifact({ buffer, hash, fileName, mimeType, size }) {
         text = buffer.toString('base64');
     }
 
-    const entities = detectEntities(text);
-    const summary = buildSummary(text);
-    const chunks = chunkText(text);
+    const governedText = dataGovernance.applyPolicies(text, { fileName, mimeType });
+    const entities = detectEntities(governedText);
+    const summary = buildSummary(governedText);
+    const chunks = chunkText(governedText);
 
     return {
         hash,
         fileName,
         mimeType,
         size,
-        text,
+        text: governedText,
         summary,
         chunkCount: chunks.length,
         chunks,
@@ -166,6 +169,11 @@ async function extractFromZip(buffer, parentMeta) {
         if (entry.dir) continue;
         const entryBuffer = await entry.async('nodebuffer');
         const entryHash = crypto.createHash('sha256').update(entryBuffer).digest('hex');
+        const cached = await artifactCache.get(entryHash);
+        if (cached) {
+            artifacts.push(...cached.map(artifact => ({ ...artifact, parentHash: parentMeta.hash, parentName: parentMeta.fileName })));
+            continue;
+        }
         const artifact = await buildArtifact({
             buffer: entryBuffer,
             hash: entryHash,
@@ -176,17 +184,24 @@ async function extractFromZip(buffer, parentMeta) {
         artifact.parentHash = parentMeta.hash;
         artifact.parentName = parentMeta.fileName;
         artifacts.push(artifact);
+        await artifactCache.set(entryHash, [artifact]);
     }
     return artifacts;
 }
 
 async function extractArtifactsForFileMeta(fileMeta, storageService) {
+    const cachedArtifacts = await artifactCache.get(fileMeta.hash);
+    if (cachedArtifacts) {
+        return cachedArtifacts;
+    }
     const buffer = await storageService.readFileBuffer(fileMeta.hash);
     if ((fileMeta.mimeType || '').toLowerCase() === 'application/zip' || (fileMeta.fileName || '').toLowerCase().endsWith('.zip')) {
-        return extractFromZip(buffer, {
+        const artifacts = await extractFromZip(buffer, {
             hash: fileMeta.hash,
             fileName: fileMeta.originalName || fileMeta.name,
         });
+        await artifactCache.set(fileMeta.hash, artifacts);
+        return artifacts;
     }
 
     const artifact = await buildArtifact({
@@ -196,6 +211,7 @@ async function extractArtifactsForFileMeta(fileMeta, storageService) {
         mimeType: fileMeta.mimeType,
         size: fileMeta.size,
     });
+    await artifactCache.set(fileMeta.hash, [artifact]);
     return [artifact];
 }
 

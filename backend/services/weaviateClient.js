@@ -2,10 +2,17 @@
 const weaviateModule = require('weaviate-ts-client');
 const weaviate = weaviateModule.default ?? weaviateModule;
 
-const client = weaviate.client({
-    scheme: 'http',
-    host: 'localhost:8080',
-});
+const scheme = process.env.WEAVIATE_SCHEME || 'http';
+const host = process.env.WEAVIATE_HOST || 'localhost:8080';
+const apiKeyValue = process.env.WEAVIATE_API_KEY;
+
+const clientOptions = { scheme, host };
+if (apiKeyValue) {
+    const ApiKey = weaviateModule.ApiKey || weaviate.ApiKey;
+    clientOptions.apiKey = new ApiKey(apiKeyValue);
+}
+
+const client = weaviate.client(clientOptions);
 
 const className = 'DocumentChunk';
 

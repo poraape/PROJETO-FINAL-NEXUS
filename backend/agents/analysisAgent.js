@@ -33,7 +33,7 @@ function register({ eventBus, updateJobStatus, metrics }) {
         try {
             const artifacts = payload.artifacts || [];
             const fileContentsForAnalysis = payload.fileContentsForAnalysis || artifacts.map(art => ({ fileName: art.fileName, content: art.text }));
-            await updateJobStatus(jobId, 3, 'in-progress', 'Ag. Inteligência: Gerando análise executiva...');
+            await updateJobStatus(jobId, 4, 'in-progress', 'Ag. Inteligência: Gerando análise executiva...');
             const { context, stats } = buildAnalysisContext(artifacts);
 
             const prompt = `
@@ -53,7 +53,6 @@ Você é um analista fiscal especializado. Com base nos dados agregados e nos re
   "simulationResult": object | null
 }
 
-Use as estatísticas agregadas e o contexto resumido. Se identificar que o valor total das notas supera 100000, use a ferramenta 'tax_simulation' com regime 'Lucro Real'.
 Use as estatísticas agregadas e o contexto resumido. Os dados já foram pré-validados por outros agentes.
 Se identificar que o valor total das notas supera 100000, use a ferramenta 'tax_simulation' com regime 'Lucro Real'.
 Não use ferramentas para validações simples como CNPJ, pois isso já foi feito.
@@ -72,6 +71,7 @@ ${context || fileContentsForAnalysis.map(f => `### Documento: ${f.fileName}\n${(
 
             const chat = model.startChat({
                 tools: availableTools,
+                config: { responseMimeType: 'application/json' },
             });
 
             const result = await chat.sendMessage(prompt);
@@ -80,12 +80,12 @@ ${context || fileContentsForAnalysis.map(f => `### Documento: ${f.fileName}\n${(
             if (call) {
                 console.log(`[AnalysisAgent] Job ${jobId}: IA solicitou o uso da ferramenta '${call.name}'. Acionando o ToolsAgent.`);
                 // A IA quer usar uma ferramenta. Pausamos esta tarefa e pedimos ao Orquestrador para executar a ferramenta.
-                eventBus.emit('tool:run', { jobId, toolCall: call, payload });
+                eventBus.emit('tool:run', { jobId, toolCall: call, payload, prompt });
                 // A continuação ocorrerá quando o Orquestrador receber 'tool:completed'
             } else {
                 // A IA respondeu diretamente.
                 const executiveSummary = robustJsonParse(result.response.text());
-                await updateJobStatus(jobId, 3, 'completed');
+                await updateJobStatus(jobId, 4, 'completed');
                 eventBus.emit('task:completed', { jobId, taskName, resultPayload: { executiveSummary }, payload: payload });
             }
 
@@ -95,19 +95,24 @@ ${context || fileContentsForAnalysis.map(f => `### Documento: ${f.fileName}\n${(
     });
 
     // O Orquestrador recebe o resultado da ferramenta e devolve ao Agente de Análise para que ele continue seu raciocínio.
-    eventBus.on('orchestrator:tool_completed', async ({ jobId, toolResult, originalPayload }) => {
+    eventBus.on('orchestrator:tool_completed', async ({ jobId, toolResult, originalPayload, prompt, toolName }) => {
         try {
             console.log(`[Orquestrador] Job ${jobId}: Resultado da ferramenta recebido. Devolvendo ao Agente de Análise.`);
-            const chat = model.startChat({
-                tools: availableTools,
+            const followUpPrompt = `
+${prompt}
+
+Resultado da ferramenta '${toolName || 'tax_simulation'}':
+${JSON.stringify(toolResult, null, 2)}
+
+Atualize o JSON final seguindo exatamente a mesma estrutura definida anteriormente.`.trim();
+
+            const result = await model.generateContent({
+                contents: [{ parts: [{ text: followUpPrompt }] }],
+                generationConfig: { responseMimeType: 'application/json' },
             });
 
-            // Envia o resultado da ferramenta de volta para a IA
-            const result = await chat.sendMessage([{ functionResponse: { name: 'tax_simulation', response: toolResult } }]);
-
-            // Agora a IA deve fornecer a resposta final com base no resultado da ferramenta
             const executiveSummary = robustJsonParse(result.response.text());
-            await updateJobStatus(jobId, 3, 'completed', 'Análise com simulação concluída.');
+            await updateJobStatus(jobId, 4, 'completed', 'Análise com simulação concluída.');
             eventBus.emit('task:completed', { jobId, taskName: 'analysis', resultPayload: { executiveSummary }, payload: originalPayload });
 
         } catch (error) {

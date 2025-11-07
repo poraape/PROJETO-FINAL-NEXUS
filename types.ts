@@ -3,10 +3,10 @@
 export type Theme = 'dark' | 'light';
 
 export enum ProcessingStepStatus {
-  PENDING = 'PENDING',
-  IN_PROGRESS = 'IN_PROGRESS',
-  COMPLETED = 'COMPLETED',
-  FAILED = 'FAILED',
+  PENDING = 'pending',
+  IN_PROGRESS = 'in-progress',
+  COMPLETED = 'completed',
+  FAILED = 'failed',
 }
 
 export interface PipelineStep {

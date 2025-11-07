@@ -8,9 +8,35 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { PassThrough } = require('stream');
 
 const TMP_DIR = process.env.UPLOAD_TMP_DIR || path.join(__dirname, '..', '..', '.uploads', 'tmp');
 const STORAGE_DIR = process.env.UPLOAD_STORAGE_DIR || path.join(__dirname, '..', '..', '.uploads', 'objects');
+const CACHE_DIR = process.env.UPLOAD_CACHE_DIR || path.join(__dirname, '..', '..', '.uploads', 'cache');
+const RETENTION_HOURS = parseInt(process.env.UPLOAD_RETENTION_HOURS || '24', 10);
+const CLEANUP_INTERVAL_MINUTES = parseInt(process.env.UPLOAD_CLEANUP_INTERVAL_MINUTES || '60', 10);
+const isTestEnv = process.env.NODE_ENV === 'test' || Boolean(process.env.JEST_WORKER_ID);
+const ENCRYPTION_HEADER = Buffer.from('NQI2');
+const ENCRYPTION_ALGO = 'aes-256-gcm';
+
+function deriveEncryptionKey() {
+    const rawKey = process.env.UPLOAD_ENCRYPTION_KEY;
+    if (!rawKey) return null;
+    try {
+        if (rawKey.length === 64 && /^[a-fA-F0-9]+$/.test(rawKey)) {
+            return Buffer.from(rawKey, 'hex');
+        }
+        return crypto.createHash('sha256').update(rawKey).digest();
+    } catch {
+        return null;
+    }
+}
+
+const ENCRYPTION_KEY = deriveEncryptionKey();
+
+function encryptionEnabled() {
+    return Boolean(ENCRYPTION_KEY);
+}
 
 function ensureDirSync(dirPath) {
     if (!fs.existsSync(dirPath)) {
@@ -21,6 +47,10 @@ function ensureDirSync(dirPath) {
 function init() {
     ensureDirSync(TMP_DIR);
     ensureDirSync(STORAGE_DIR);
+    ensureDirSync(CACHE_DIR);
+    if (!isTestEnv) {
+        scheduleCleanup();
+    }
 }
 
 function getTmpDir() {
@@ -29,6 +59,11 @@ function getTmpDir() {
 
 function getStorageDir() {
     return STORAGE_DIR;
+}
+
+function getCacheDir() {
+    ensureDirSync(CACHE_DIR);
+    return CACHE_DIR;
 }
 
 async function hashFile(filePath) {
@@ -48,7 +83,12 @@ async function persistUploadedFile(file) {
 
     const alreadyExists = fs.existsSync(storedPath);
     if (!alreadyExists) {
-        await fs.promises.rename(tempPath, storedPath);
+        if (encryptionEnabled()) {
+            await encryptFile(tempPath, storedPath);
+            await fs.promises.unlink(tempPath);
+        } else {
+            await fs.promises.rename(tempPath, storedPath);
+        }
     } else {
         // Duplicate upload, discard temporary instance.
         await fs.promises.unlink(tempPath);
@@ -82,19 +122,122 @@ async function persistUploadedFiles(files = []) {
 
 async function readFileBuffer(hash) {
     const storedPath = path.join(STORAGE_DIR, hash);
-    return fs.promises.readFile(storedPath);
+    const buffer = await fs.promises.readFile(storedPath);
+    if (encryptionEnabled()) {
+        return decryptBuffer(buffer);
+    }
+    return buffer;
 }
 
 function createReadStream(hash) {
     const storedPath = path.join(STORAGE_DIR, hash);
-    return fs.createReadStream(storedPath);
+    if (!encryptionEnabled()) {
+        return fs.createReadStream(storedPath);
+    }
+    const passthrough = new PassThrough();
+    fs.promises.readFile(storedPath).then(buffer => {
+        try {
+            const decrypted = decryptBuffer(buffer);
+            passthrough.end(decrypted);
+        } catch (error) {
+            passthrough.destroy(error);
+        }
+    }).catch(err => passthrough.destroy(err));
+    return passthrough;
+}
+
+async function cleanupDirectory(dirPath) {
+    const files = await fs.promises.readdir(dirPath).catch(() => []);
+    const now = Date.now();
+    const maxAgeMs = RETENTION_HOURS * 60 * 60 * 1000;
+    await Promise.all(files.map(async file => {
+        const filePath = path.join(dirPath, file);
+        try {
+            const stats = await fs.promises.stat(filePath);
+            if (!stats.isFile()) return;
+            if (now - stats.mtimeMs > maxAgeMs) {
+                await fs.promises.unlink(filePath);
+            }
+        } catch {
+            // Ignora erros unitários para não interromper a limpeza
+        }
+    }));
+}
+
+async function cleanupOldFiles() {
+    await Promise.all([
+        cleanupDirectory(STORAGE_DIR),
+        cleanupDirectory(TMP_DIR),
+        cleanupDirectory(CACHE_DIR),
+    ]);
+}
+
+function scheduleCleanup() {
+    const intervalMs = CLEANUP_INTERVAL_MINUTES * 60 * 1000;
+    setInterval(() => {
+        cleanupOldFiles().catch(err => {
+            console.warn('[Storage] Falha ao executar limpeza programada:', err);
+        });
+    }, intervalMs).unref?.();
+}
+
+function decryptBuffer(buffer) {
+    if (!ENCRYPTION_KEY) {
+        throw new Error('Chave de criptografia não configurada.');
+    }
+    if (buffer.length < ENCRYPTION_HEADER.length + 12 + 16) {
+        throw new Error('Arquivo criptografado inválido.');
+    }
+    const header = buffer.subarray(0, ENCRYPTION_HEADER.length);
+    if (!header.equals(ENCRYPTION_HEADER)) {
+        throw new Error('Cabeçalho de criptografia ausente.');
+    }
+    const ivStart = ENCRYPTION_HEADER.length;
+    const ivEnd = ivStart + 12;
+    const iv = buffer.subarray(ivStart, ivEnd);
+    const tag = buffer.subarray(buffer.length - 16);
+    const ciphertext = buffer.subarray(ivEnd, buffer.length - 16);
+    const decipher = crypto.createDecipheriv(ENCRYPTION_ALGO, ENCRYPTION_KEY, iv);
+    decipher.setAuthTag(tag);
+    return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+}
+
+function encryptFile(sourcePath, destinationPath) {
+    return new Promise((resolve, reject) => {
+        const iv = crypto.randomBytes(12);
+        const cipher = crypto.createCipheriv(ENCRYPTION_ALGO, ENCRYPTION_KEY, iv);
+        const destination = fs.createWriteStream(destinationPath);
+        destination.write(ENCRYPTION_HEADER);
+        destination.write(iv);
+
+        const source = fs.createReadStream(sourcePath);
+        source.on('error', reject);
+        cipher.on('error', reject);
+        destination.on('error', reject);
+
+        cipher.on('end', () => {
+            try {
+                const tag = cipher.getAuthTag();
+                destination.write(tag);
+                destination.end();
+            } catch (error) {
+                reject(error);
+            }
+        });
+
+        destination.on('finish', resolve);
+
+        source.pipe(cipher).pipe(destination, { end: false });
+    });
 }
 
 module.exports = {
     init,
     getTmpDir,
     getStorageDir,
+    getCacheDir,
     persistUploadedFiles,
     readFileBuffer,
     createReadStream,
+    cleanupOldFiles,
 };

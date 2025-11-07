@@ -1,224 +1,248 @@
-# Nexus QuantumI2A2 - Ecossistema de Inteligência Fiscal
+# Nexus QuantumI2A2 – Ecossistema de Inteligência Fiscal
 
-**Nexus QuantumI2A2** é uma plataforma de inteligência fiscal que transforma documentos tributários complexos em insights acionáveis. Utilizando um sistema multi-agente orquestrado por um backend robusto e a API Google Gemini, a plataforma automatiza o processamento, validação e análise de uma vasta gama de arquivos fiscais brasileiros, entregando relatórios interativos, simulações e um assistente de IA contextual.
-
----
-
-## 🚀 Principais Funcionalidades
-
-A plataforma opera com uma arquitetura de **análise em camadas**, permitindo que o usuário comece com uma visão geral rápida e aprofunde a investigação sob demanda.
-
-#### 1. **Processamento Assíncrono e Inteligente de Arquivos**
-- **Amplo Suporte a Formatos:** Faça upload de múltiplos arquivos, incluindo `XML` (NF-e), `PDF` (com OCR integrado para documentos digitalizados), `CSV`, `SPED`, `DOCX`, `XLSX`, e mais.
-- **Processamento em Background:** Os arquivos são enviados para um backend que processa os dados de forma assíncrona, permitindo que o usuário acompanhe o progresso em tempo real via WebSockets sem travar a interface.
-- **Extração Automática de `.zip`:** Arquivos compactados são descompactados e processados individualmente no servidor.
-
-#### 2. **Dashboard de Análise em Camadas**
-- **Análise Executiva:** Logo após o processamento, um dashboard interativo apresenta um resumo com métricas chave, risco tributário, composição de impostos e insights acionáveis gerados pela IA.
-- **Simulador Tributário Inteligente:** Projete cenários para os regimes `Lucro Presumido`, `Lucro Real` e `Simples Nacional`. O sistema realiza os cálculos e utiliza a IA para gerar a análise textual e as recomendações.
-- **Análise Comparativa e Textual Completa (Sob Demanda):** Compare conjuntos de arquivos ou solicite um relatório textual profundo para investigações detalhadas.
-
-#### 3. **Chat Interativo com RAG (Retrieval-Augmented Generation)**
-- **Consultoria Contextual:** Converse com a IA, que responde com base no conteúdo completo dos documentos previamente processados e indexados em uma base de dados vetorial (Weaviate).
-- **Anexo de Arquivos:** Anexe novos arquivos diretamente na conversa para obter respostas imediatas sobre eles.
-
-#### 4. **Exportação Avançada de Dados**
-- **Relatórios Gerenciais:** Exporte a visualização do dashboard e a conversa com a IA para os formatos `PDF`, `DOCX` e `HTML`.
-- **Automação Contábil:** Gere sugestões de lançamentos contábeis e exporte-os em formato `CSV` para integração com sistemas ERP.
+Nexus QuantumI2A2 é um ecossistema de análise fiscal que combina processamento assíncrono de documentos, um pipeline multiagente e recursos de IA (Google Gemini) para transformar arquivos tributários brasileiros em dashboards interativos, simulações tributárias e relatórios exportáveis. Este README consolida o estado *atual e validado* do repositório para auditores, desenvolvedores e demais stakeholders.
 
 ---
 
-## 🏗️ Arquitetura e Pilha Tecnológica
+## 1. Visão Geral
 
-Nexus QuantumI2A2 utiliza uma arquitetura moderna com um **Frontend (SPA)** e um **Backend-for-Frontend (BFF)**, garantindo segurança, escalabilidade e processamento eficiente.
+### Propósito e escopo
+- Automatizar a leitura de arquivos fiscais heterogêneos (NF-e XML, PDF com OCR, CSV, DOCX, XLSX, ZIP) e gerar insights acionáveis.
+- Fornecer um dashboard único para acompanhamento do pipeline, simulações tributárias, reconciliação bancária e chat com RAG contextual.
+- Servir como camadas BFF + SPA para operar com segurança (chave Gemini apenas no backend), escalabilidade (BullMQ/Redis) e rastreabilidade (logs estruturados, métricas Prometheus).
+
+### Capacidades principais
+- Upload em lote com acompanhamento em tempo real via WebSockets.
+- Pipeline de agentes: extração, validação, auditoria, classificação, análise (IA) e indexação para RAG.
+- Dashboard modular (Tremor) com sumário executivo, tendências NF-e, simulador tributário e exportação (PDF, DOCX, HTML, SPED, EFD, CSV, ledger).
+- Chat fiscal com RAG (Weaviate) e anexos adicionais, integrando ferramentas (`tax_simulation`, `cnpj_validation`).
+- Serviços complementares: reconciliação bancária a partir de OFX/CSV, automação contábil e persistência local (`.uploads/`).
+
+---
+
+## 2. Arquitetura Validada
+
+O projeto adota um **Frontend React + Vite (TypeScript)** acoplado a um **Backend-for-Frontend em Node.js/Express**. A orquestração de jobs é feita via BullMQ + Redis; vetores são armazenados no Weaviate para o chat RAG; o pipeline IA usa Google Gemini via `@google/genai`.
+
+```mermaid
+flowchart LR
+    User((Usuário)) -->|Upload/Chat| Frontend[React 18 + Tremor SPA]
+    Frontend -->|HTTP + WS| BFF[Node.js/Express BFF]
+    BFF -->|BullMQ Tasks| Agents[[Agentes do Pipeline]]
+    Agents -->|Status| Redis[(Redis 7)]
+    Agents -->|Artefatos| Storage[(.uploads/)]
+    Agents -->|Vetores| Weaviate[(Weaviate 1.24)]
+    BFF -->|Gemini API| Gemini[Google Gemini]
+    BFF -->|Metrics| Observabilidade[(Logs + /metrics)]
+    Frontend <-->|Dash/Exports| BFF
+```
+
+### Componentes e artefatos
+
+| Domínio | Descrição | Artefatos-chave |
+| --- | --- | --- |
+| Frontend SPA | React 18 + Vite 6.2, componentes Tremor, Tailwind (CDN). Carrega `App.tsx`, memória cognitiva em `contexts/` e serviços em `services/`. | `App.tsx`, `components/`, `services/*.ts`, `config.ts`, `contexts/` |
+| Backend BFF | Express + WebSocket Server; rotas em `backend/routes`; pipeline multiagente em `backend/agents`; storage local e ferramentas Gemini. | `backend/server.js`, `backend/routes/`, `backend/agents/`, `backend/services/` |
+| Infraestrutura | Redis para estado/cache, Weaviate para RAG, BullMQ workers, Docker Compose para dev. | `docker-compose.yml`, `.uploads/`, `weaviate_data/`, `backend/services/queue.js` |
+| CI / Automação | GitHub Actions `ci.yml` executa `npm ci`, testes backend e `npm run build`. Script `start-dev.sh` levanta todo o stack localmente. | `.github/workflows/ci.yml`, `start-dev.sh` |
+
+---
+
+## 3. Fluxos e Agentes
+
+### Pipeline backend (definido em `backend/pipeline.yaml`)
+
+| Ordem | Agente | Responsabilidades principais | Saídas relevantes |
+| --- | --- | --- | --- |
+| 1 | `extractionAgent` | Descompacta, converte e normaliza arquivos via `services/extractor.js`; extrai entidades e chunks. | Artefatos textuais + metadados para Redis/Weaviate |
+| 2 | `validationAgent` | Regras de consistência e enriquecimento (CNPJ, CFOP, valores). | Alertas/validações em `job.pipeline[1]` |
+| 3 | `auditAgent` | Auditoria simulada e classificação preliminar de risco. | Findings para dashboards |
+| 4 | `classificationAgent` | Tagging (tipo de operação/setor) e preparação para simulação. | Estrutura para IA e exportações |
+| 5 | `analysisAgent` | Orquestra prompts Gemini, chama ferramentas (`tax_simulation`, `cnpj_validation`), gera `executiveSummary`. | Relatório executivo JSON |
+| 6 | `indexingAgent` | Vetoriza chunks e persiste no Weaviate (`DocumentChunk`). | Base RAG para chat/contexto |
+
+Eventos (`eventBus`) acionam filas BullMQ (`backend/services/queue.js`). O estado de cada job fica em `redisClient` (`job:{id}`), exibido via WebSocket (`ws://.../ ?jobId=`). Arquivos persistem em `.uploads/objects` via `storageService`.
+
+### Frontend e fluxos de experiência
+- **Upload & Tracking:** `FileUpload.tsx` envia `FormData` para `/api/jobs`. `PipelineTracker.tsx` reflete `job.pipeline`.
+- **Dashboard modular:** `components/dashboard/*.tsx` apresentam métricas, insights CSV, simulações (`TaxSimulator`), comparativos e chat (`InteractiveChat.tsx`).
+- **Memória cognitiva local:** `services/contextMemory.ts` guarda índices, caches de Q&A, forecast, correções de classificação e feedbacks.
+- **Exportação client-side:** `services/exportService.ts` captura DOM e gera PDF/DOCX/HTML com jsPDF, docx e html2canvas.
+
+### Integrações e serviços auxiliares
+- **Chat RAG (`POST /api/jobs/:id/chat`):** combina Weaviate, contexto estruturado do job e anexos adicionais (processados por `extractArtifactsFromMetas`). Cacheado em Redis.
+- **Exportações fiscais (`POST /api/jobs/:id/exports`):** gera SPED, EFD, CSV ERP e ledger contábil via `services/exporter.js`.
+- **Conciliação bancária (`POST /api/jobs/:id/reconciliation`):** processa OFX/CSV em `services/reconciliation.js`.
+- **Observabilidade:** logs (Pino-like) em `services/logger`, métricas Prometheus-like expostas em `/metrics`.
+
+---
+
+## 4. Tecnologias & Dependências Open Source
 
 ### Frontend
-- **Framework**: React 18 com TypeScript.
-- **Arquitetura "No-Build"**: O projeto é executado diretamente no navegador sem um processo de build (Webpack, Vite). As dependências são gerenciadas via `importmap` no `index.html`.
-- **Estilização**: Tailwind CSS (via CDN) com temas customizáveis (Dark/Light).
-- **Componentes de UI & Gráficos**: Tremor React para dashboards e gráficos interativos.
-- **Comunicação em Tempo Real**: WebSockets para receber atualizações de status do processamento de arquivos do backend.
 
-### Backend (BFF)
-- **Plataforma**: Node.js com Express.
-- **Processamento Assíncrono**: Um sistema de jobs com `multer` para upload, `uuid` para IDs de job e um `eventBus` para orquestrar um pipeline de tarefas.
-- **Gerenciamento de Estado**: **Redis** é utilizado para armazenar o estado e o progresso dos jobs de processamento.
-- **Inteligência Artificial**:
-  - A **API Google Gemini** (modelo `gemini-1.5-flash`) é consumida de forma segura no backend.
-  - **Funções de Ferramenta (Tools)** são usadas para permitir que a IA execute tarefas específicas, como validação de CNPJ e simulações tributárias.
-- **Banco de Dados Vetorial (RAG)**: **Weaviate** é usado para indexar o conteúdo dos documentos, permitindo buscas semânticas para o chat contextual.
-- **Segurança**: A chave da API Gemini é gerenciada de forma segura no backend via variáveis de ambiente (`.env`), eliminando a exposição no lado do cliente.
+| Tecnologia | Versão | Uso |
+| --- | --- | --- |
+| React | ^18.2.0 | SPA, hooks e ecossistema. |
+| Vite | ^6.2.0 | Dev server/build. |
+| TypeScript | ~5.8.2 | Tipagem estática. |
+| Tremor React | 3.17.2 | Dashboards/gráficos. |
+| Tailwind CSS | 3.x (CDN) | Estilização utility-first. |
+| @google/genai | ^1.28.0 | Cliente Gemini no browser (proxy via BFF). |
+| jsPDF / docx / html2canvas | 2.5.1 / 8.5.0 / 1.4.1 | Exportação de relatórios. |
+| tesseract.js, pdfjs-dist, PapaParse, xml-js, jszip | 5.1.0 / 4.3.136 / 5.4.1 / 1.6.11 / 3.10.1 | Parsing/OCR/ZIP local. |
 
-### Pipeline de Processamento de Dados
-O backend orquestra um pipeline de agentes (definido em `pipeline.yaml`) para cada job:
-1.  **Extração:** Lê e extrai texto de diversos formatos de arquivo.
-2.  **Validação:** Identifica e valida dados como CNPJs.
-3.  **Auditoria e Classificação:** Agentes simulados que analisam e categorizam as informações.
-4.  **Análise (IA):** O agente de inteligência usa a API Gemini para gerar o resumo executivo.
-5.  **Indexação:** O conteúdo é vetorizado e armazenado no Weaviate para o sistema RAG.
+### Backend
 
----
+| Tecnologia | Versão | Uso |
+| --- | --- | --- |
+| Node.js (recomendado ≥18) | — | Runtime. |
+| Express | ^4.19.2 | API HTTP/WS BFF. |
+| ws | ^8.18.3 | WebSocket server. |
+| BullMQ | ^5.15.0 | Filas/Workers. |
+| redis (cliente) | ^4.6.13 | Estado de jobs/cache. |
+| @google/genai | ^0.11.0 | Chamadas Gemini server-side. |
+| weaviate-ts-client | ^2.0.0 | CRUD de vetores RAG. |
+| multer, uuid, joi | ^1.4.5 / ^9.0.1 / ^17.13.1 | Upload, IDs e validação. |
+| pdf-parse, mammoth, xlsx, csv-parse | — | Extração de artefatos server-side. |
 
-## 🧩 Capacidades Avançadas
+### Infraestrutura
 
-### Sistema de Memória Cognitiva
-A aplicação utiliza `localStorage` no frontend para cache de UI e `Redis` / `Weaviate` no backend para persistência de dados e contexto.
-- **Frontend:** Armazena o resumo da última sessão para restauração rápida do dashboard e cache de feedback do usuário.
-- **Backend:**
-  - **Redis:** Mantém o estado de jobs em andamento e finalizados.
-  - **Weaviate:** Funciona como a memória de longo prazo, indexando o conteúdo dos documentos para o sistema RAG do chat.
+| Serviço | Versão | Papel |
+| --- | --- | --- |
+| Redis | 7-alpine (Docker) | Cache e filas BullMQ. |
+| Weaviate | 1.24.1 | Banco vetorial para RAG. |
+| Docker / Docker Compose | ≥20.x / v2 | Provisiona Redis + Weaviate localmente. |
 
-### Agente de Auditoria Interna
-Um agente de autoavaliação (`auditorAgent.ts`) é executado periodicamente para monitorar e "pontuar" a performance dos outros agentes do sistema, garantindo a saúde e a consistência da plataforma.
+Lista completa no arquivo `DEPENDENCIES.md`.
 
 ---
 
-## 📂 Estrutura do Projeto
-
-```
-/
-├── backend/              # Lógica do servidor (BFF)
-│   ├── services/         # Módulos do backend (Redis, Weaviate, Parser, etc.)
-│   ├── server.js         # Ponto de entrada do servidor Express e WebSocket
-│   └── pipeline.yaml     # Definição do pipeline de processamento de jobs
-├── components/           # Componentes React reutilizáveis (Frontend)
-│   ├── dashboard/        # Componentes específicos do Dashboard
-│   └── ...
-├── services/             # Lógica de negócio do Frontend
-│   ├── geminiService.ts  # Funções que interagem com os endpoints do BFF
-│   └── ...
-├── App.tsx               # Componente raiz da aplicação React
-├── index.html            # Ponto de entrada HTML (contém o importmap)
-├── DEPENDENCIES.md       # Catálogo de dependências
-└── README.md             # Este arquivo
-```
-
----
-
-## 🌐 Endpoints da API
-
-O backend expõe uma API RESTful para o frontend. Abaixo estão os principais endpoints:
-
-### Health Check
-
-*   **Endpoint:** `GET /api/health`
-*   **Descrição:** Verifica a saúde do servidor e de suas dependências (Redis, Weaviate, chave da API Gemini).
-*   **Retorno de Sucesso (200 OK):**
-    ```json
-    {
-      "status": "ok",
-      "timestamp": "2023-10-27T10:00:00.000Z",
-      "services": {
-        "redis": "ok",
-        "weaviate": "ok",
-        "gemini_api": "ok"
-      }
-    }
-    ```
-*   **Retorno de Falha (503 Service Unavailable):** Indica que um ou mais serviços estão indisponíveis.
-
-### Gerenciamento de Jobs
-
----
-
-## ✅ Testes, CI e Observabilidade
-
-### Testes locais
-
-- **Backend (Jest):**
-  ```bash
-  GEMINI_API_KEY=test-key NODE_ENV=test npm --prefix backend test
-  ```
-  > Importante: em ambientes restritos (como alguns Codespaces) o sistema operacional pode bloquear `server.listen`, resultando em `EPERM`. Em máquinas de desenvolvimento ou na pipeline CI o conjunto de testes roda normalmente porque não há essa limitação de portas.
-
-- **Build Frontend (Vite):**
-  ```bash
-  npm run build
-  ```
-
-### Pipeline CI GitHub Actions
-
-O workflow [`ci.yml`](.github/workflows/ci.yml) executa automaticamente em cada push/pull request para `main` ou `teste`, realizando:
-
-1. `npm ci` no projeto raiz (frontend).
-2. `npm ci` no diretório `backend/`.
-3. `npm --prefix backend test`.
-4. `npm run build`.
-
-Isso garante que regressões sejam detectadas cedo, mesmo que localmente os testes não possam abrir sockets.
-
-### Observabilidade
-
-- **Logs estruturados:** todo request HTTP e eventos dos agentes usam `services/logger` (baseado em `pino`), facilitando coleta em ferramentas externas.
-- **Métricas:** o endpoint `/metrics` expõe contadores e histograms Prometheus (ex.: `http_request_duration_ms`, `jobs_started_total`). Basta apontar um Prometheus/Grafana para essa rota.
-- **Alertas internos:** o `alertAgent` continua emitindo eventos de risco/erros para o bus interno; basta conectar a um canal externo (Slack, e-mail) para alertas em produção.
-
----
-
-*   **Endpoint:** `POST /api/jobs`
-*   **Descrição:** Inicia um novo job de análise de arquivos. A requisição deve ser do tipo `multipart/form-data`.
-*   **Validação de Schema:** O endpoint valida a quantidade de arquivos enviados:
-    *   É necessário enviar no mínimo **1 arquivo**.
-    *   O limite máximo é de **20 arquivos** por job.
-*   **Retorno de Erro (400 Bad Request):** Se a validação falhar, retorna uma mensagem clara. Ex: `{"message": "É necessário enviar pelo menos 1 arquivo."}`.
-
----
-
-## 🛠️ Instalação e Execução Local
+## 5. Requisitos e Configuração de Ambiente
 
 ### Pré-requisitos
-1.  **Node.js**: Versão 18 ou superior.
-2.  **Docker e Docker Compose**: Para executar os serviços de infraestrutura (Redis e Weaviate).
-3.  **Chave da API Google Gemini**: Obtenha uma chave de API válida no Google AI Studio.
+1. Node.js 18 LTS (ou superior) + npm.
+2. Docker e Docker Compose (para Redis/Weaviate).
+3. Chave válida da API Google Gemini (`GEMINI_API_KEY`).
+4. Espaço local para `.uploads/` e `weaviate_data/`.
 
-### 1. Usando o Script de Inicialização (Recomendado)
+### Variáveis de ambiente (arquivo `backend/.env`)
+```env
+PORT=3001
+GEMINI_API_KEY=seu-token
+GEMINI_MODEL_ID=gemini-2.5-flash
+GEMINI_EMBEDDING_MODEL_ID=text-embedding-004
+REDIS_URL=redis://localhost:6379
+UPLOAD_MAX_FILE_SIZE_MB=200
+UPLOAD_MAX_FILES=20
+CHAT_MAX_ATTACHMENTS=5
+UPLOAD_CACHE_DIR=.uploads/cache
+UPLOAD_RETENTION_HOURS=24
+UPLOAD_CLEANUP_INTERVAL_MINUTES=60
+UPLOAD_ENCRYPTION_KEY=troque-por-uma-chave-segura
+DATA_GOVERNANCE_MASKING=true
+WEAVIATE_SCHEME=http
+WEAVIATE_HOST=localhost:8080
+WEAVIATE_API_KEY=dev-weaviate-key
+```
+Outras flags opcionais: `UPLOAD_TMP_DIR`, `CHAT_ATTACHMENT_SNIPPET_LENGTH`, `GEMINI_MAX_RETRIES`, etc. O frontend lê `VITE_BFF_API_URL`/`VITE_BFF_PORT` quando necessário.
 
-O projeto inclui um script para automatizar todo o processo de inicialização.
-
-a. **Torne o script executável (apenas na primeira vez):**
-    ```bash
-    chmod +x start-dev.sh
-    ```
-
-b. **Execute o script:**
-    ```bash
-    ```
-
-O script irá:
-1.  Instalar as dependências do backend.
-2.  Iniciar os serviços do Docker (Redis e Weaviate).
-3.  Iniciar o servidor do backend.
-4.  Iniciar o servidor do frontend.
-5.  Acesse a aplicação em `http://localhost:8000`.
-
-### 2.     ./start-dev.sh
-Execução Manual (Passo a Passo)
-
-a. **Configure as variáveis de ambiente:**
-   - Crie um arquivo `.env` na pasta `backend`.
-   - Adicione sua chave da API Gemini ao arquivo:
-     ```env
-     # backend/.env
-     GEMINI_API_KEY="SUA_CHAVE_API_AQUI"
-     ```
-
-b. **Siga os passos de inicialização** do backend e frontend conforme descrito na seção "Instalação e Execução Local" do `README.md` anterior.
+### Variáveis de ambiente (frontend)
+```env
+VITE_CHAT_MAX_RAG_SNIPPETS=6
+VITE_CHAT_RAG_SNIPPET_LENGTH=600
+VITE_CHAT_ATTACHMENT_SNIPPET_LENGTH=800
+VITE_CHAT_FALLBACK_FILE_LIMIT=3
+VITE_CHAT_FALLBACK_CHAR_BUDGET=12000
+```
 
 ---
 
-## 🤝 Como Contribuir
+## 6. Instalação e Execução
 
-Contribuições são bem-vindas! Siga os passos abaixo:
+### Inicialização automatizada (recomendado)
+```bash
+chmod +x start-dev.sh
+./start-dev.sh
+```
+O script instala dependências, sobe Redis/Weaviate via Docker, valida saúde dos serviços, inicia `backend/server.js` (porta 3001) e o Vite Dev Server (porta 8000). Logs do backend ficam em `backend.log`.
 
-1.  **Faça um Fork** do repositório.
-2.  **Crie uma nova branch** para sua feature ou correção (`git checkout -b feature/minha-feature`).
-3.  **Implemente suas alterações**, seguindo os padrões de código existentes.
-4.  **Faça o commit** das suas alterações com uma mensagem clara (`git commit -m 'feat: Adiciona nova funcionalidade'`).
-5.  **Faça o push** para a sua branch (`git push origin feature/minha-feature`).
-6.  **Abra um Pull Request** detalhando as mudanças realizadas.
+### Procedimento manual
+```bash
+# 1. Instalar dependências
+npm install
+npm --prefix backend install
+
+# 2. Provisionar serviços de apoio
+docker compose up -d   # Redis + Weaviate
+
+# 3. Configurar variáveis em backend/.env
+
+# 4. Executar backend
+NODE_ENV=development node backend/server.js
+
+# 5. Executar frontend em outra aba
+npm run dev -- --port 8000
+```
+Após o build, o frontend pode ser servido com `npm run build && npm run preview`.
 
 ---
 
-## 📄 Licença
+## 7. Testes, Qualidade e Observabilidade
 
-Este projeto está licenciado sob a Licença MIT.
+- **Testes backend:** `GEMINI_API_KEY=test npm --prefix backend test`. (Utiliza Jest + Supertest; sockets podem exigir ambiente não restrito.)
+- **Lint:** `npm --prefix backend run lint` (ESLint 8.57). Frontend utiliza o conjunto padrão do Vite/TS.
+- **Build frontend:** `npm run build`.
+- **CI:** `.github/workflows/ci.yml` executa os passos acima em pushes/PRs para `main` e `teste`.
+- **Métricas:** `GET /metrics` retorna snapshot JSON ou, com `Accept: text/plain`, formato Prometheus (`http_requests_total`, `ws_connections_active`, `analysis_prompt_tokens`, etc.).
+- **Health-check:** `GET /api/health` valida Redis, Weaviate e chave Gemini.
+- **Logs:** `services/logger` (Pino) registra requisições HTTP, eventos de agentes e falhas.
+
+---
+
+## 8. Operações e Integrações
+
+- **Upload e acompanhamento:** `POST /api/jobs` (multipart com até 20 arquivos, 50 MB cada) inicia job; o ID retornado é usado no WebSocket `ws://host:3001?jobId=...`.
+- **Chat com anexos:** `POST /api/jobs/:jobId/chat` aceita JSON (`{ question }`) ou `multipart/form-data` (campo `attachments`). As respostas podem disparar ferramentas internas antes de retornar ao usuário.
+- **Exportações fiscais:** `POST /api/jobs/:jobId/exports` com `{ "format": "sped" | "efd" | "csv" | "ledger" }` retorna payload base64 acompanhado de log/diagnóstico.
+- **Conciliação bancária:** `POST /api/jobs/:jobId/reconciliation` recebe OFX/CSV, cruza com NF-es processadas e devolve `matches`, `pendingInvoices` e `pendingTransactions`.
+- **Observabilidade Web:** `PipelineTracker`, `ErrorLogModal` e logs persistidos via `useErrorLog` facilitam auditoria visual.
+- **Gestão de armazenamento:** Arquivos em `.uploads/objects` e caches de artefatos são deduplicados por hash e limpos automaticamente após o intervalo definido pelas variáveis `UPLOAD_RETENTION_HOURS` / `UPLOAD_CLEANUP_INTERVAL_MINUTES`.
+- **Segurança vetorial:** o Weaviate local exige `WEAVIATE_API_KEY` e pode ser apontado para hosts/URIs customizados via `WEAVIATE_HOST` / `WEAVIATE_SCHEME`.
+- **Governança de dados:** para ambientes que demandem mascaramento e criptografia, habilite `DATA_GOVERNANCE_MASKING=true` e defina `UPLOAD_ENCRYPTION_KEY` (AES-256-GCM) para garantir confidencialidade dos arquivos em repouso.
+
+---
+
+## 9. Política de Contribuição e Manutenção
+
+1. **Discussões e issues:** Registre problemas/novos recursos detalhando cenários fiscais e formatos de arquivo afetados.
+2. **Branches & PRs:** Trabalhe em branches dedicadas; abra PR para `main` descrevendo mudanças e impacto fiscal/operacional.
+3. **Testes e validação:** Execute `npm --prefix backend test` e `npm run build` antes do PR. Inclua novos testes para agentes/pipelines alterados.
+4. **Documentação:** Atualize `README.md`, `DEPENDENCIES.md` e, quando aplicável, `pipeline.yaml`/diagramas sempre que mudar fluxos.
+5. **Segurança:** Nunca commitar chaves Gemini ou dumps fiscais. Utilize `.env` e secrets do GitHub Actions.
+
+Manutenção contínua inclui rodar `docker compose down` para limpar ambiente, revisar `backend.log`, e monitorar `weaviate_data/` para backups.
+
+---
+
+## 10. Licenciamento
+
+O projeto é distribuído sob a **MIT License** (`LICENSE`). Qualquer contribuição aceita herda o mesmo licenciamento.
+
+---
+
+## 11. Estado atual e riscos conhecidos
+
+- `processFilesInBackground` é referenciado em `backend/server.js`/`backend/routes/jobs.js`, mas não possui implementação visível neste commit. O pipeline descrito acima corresponde ao comportamento esperado; implemente ou corrija essa função antes de produção.
+- A pasta `.uploads/` guarda arquivos sensíveis sem criptografia. Garanta isolamento de disco e políticas de retenção ao rodar em produção.
+- Testes que dependem de sockets podem falhar em ambientes restritos (e.g., Codespaces) por bloqueio de portas; utilize runners locais/CI.
+
+Para detalhes complementares, consulte:
+- `backend/agents/*.js` — lógica de cada agente.
+- `backend/services/*.js` — integrações (Gemini, Redis, Weaviate, exportação, reconciliação).
+- `components/dashboard/` — módulos visuais.
+- `DEPENDENCIES.md` — catálogo completo de bibliotecas.
+
+---
+
+Este README reflete o estado verificado em `/workspaces/NexusQuantumI2A2-ProjetoFinal`, fornecendo um ponto único de referência técnica para novas auditorias e evolução da plataforma.

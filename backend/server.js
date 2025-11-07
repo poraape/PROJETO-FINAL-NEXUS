@@ -4,7 +4,6 @@ const http = require('http');
 const { WebSocketServer, WebSocket } = require('ws');
 const cors = require('cors');
 require('dotenv').config();
-const yaml = require('js-yaml');
 const multer = require('multer'); // multer é necessário para o contexto das rotas
 const redisClient = require('./services/redisClient');
 const weaviate = require('./services/weaviateClient');
@@ -13,15 +12,15 @@ const registerAgents = require('./agents');
 const logger = require('./services/logger').child({ module: 'server' });
 const metrics = require('./services/metrics');
 const storageService = require('./services/storage');
-
-const path = require('path');
-const fs = require('fs');
+const pipelineConfig = require('./services/pipelineConfig');
+const { availableTools } = require('./services/geminiClient');
 
 storageService.init();
 
 const app = express();
 const server = http.createServer(app);
 const port = process.env.PORT || 3001; // Porta padrão 3001
+const isTestEnv = process.env.NODE_ENV === 'test' || Boolean(process.env.JEST_WORKER_ID);
 
 const MAX_FILE_SIZE_MB = parseInt(process.env.UPLOAD_MAX_FILE_SIZE_MB || '50', 10);
 const MAX_FILES_PER_JOB = parseInt(process.env.UPLOAD_MAX_FILES || '20', 10);
@@ -86,7 +85,7 @@ app.use(express.json({ limit: '50mb' })); // Aumenta o limite de payload
 
 // --- Inicialização da API Gemini ---
 const geminiApiKey = process.env.GEMINI_API_KEY;
-if (!geminiApiKey) {
+if (!geminiApiKey && !isTestEnv) {
   logger.fatal("ERRO CRÍTICO: A variável de ambiente GEMINI_API_KEY não está definida.");
   process.exit(1);
 }
@@ -94,6 +93,86 @@ if (!geminiApiKey) {
 // --- Armazenamento de Jobs (Em memória para esta fase) ---
 const jobConnections = new Map(); // Mapeia jobId -> WebSocket
 const jobTimers = new Map();
+
+const PERSISTABLE_RESULT_KEYS = ['executiveSummary', 'simulationResult', 'validations'];
+
+function pickPersistableResult(resultPayload) {
+    if (!resultPayload || typeof resultPayload !== 'object') return null;
+    const picked = {};
+    PERSISTABLE_RESULT_KEYS.forEach(key => {
+        if (resultPayload[key] !== undefined) {
+            picked[key] = resultPayload[key];
+        }
+    });
+    return Object.keys(picked).length > 0 ? picked : null;
+}
+
+async function getJob(jobId) {
+    if (!jobId) return null;
+    const jobString = await redisClient.get(`job:${jobId}`);
+    if (!jobString) return null;
+    try {
+        return JSON.parse(jobString);
+    } catch (error) {
+        logger.error('[Server] Falha ao converter job em JSON.', { jobId, error });
+        return null;
+    }
+}
+
+async function saveJob(jobId, job) {
+    if (!jobId || !job) return;
+    await redisClient.set(`job:${jobId}`, JSON.stringify(job));
+    const ws = jobConnections.get(jobId);
+    if (ws && ws.readyState === ws.OPEN) {
+        ws.send(JSON.stringify(job));
+    }
+}
+
+async function mergeJobResult(jobId, resultPatch = {}) {
+    if (!resultPatch || Object.keys(resultPatch).length === 0) return;
+    const job = await getJob(jobId);
+    if (!job) return;
+    job.result = { ...(job.result || {}), ...resultPatch };
+    await saveJob(jobId, job);
+}
+
+async function finalizeJob(jobId, { status = 'completed', error, resultPatch } = {}) {
+    const job = await getJob(jobId);
+    if (!job) return;
+    if (resultPatch) {
+        job.result = { ...(job.result || {}), ...resultPatch };
+    }
+    job.status = status;
+    job.error = status === 'failed' ? (error || 'Falha não especificada no pipeline.') : null;
+    job.completedAt = new Date().toISOString();
+    await saveJob(jobId, job);
+}
+
+async function startTask(jobId, taskName, payload = {}) {
+    if (!taskName) {
+        await finalizeJob(jobId);
+        return;
+    }
+    try {
+        await eventBus.emit('task:start', { jobId, taskName, payload });
+        const stepIndex = pipelineConfig.getStepIndex(taskName);
+        if (stepIndex !== null) {
+            await updateJobStatus(jobId, stepIndex, 'in-progress');
+        }
+    } catch (error) {
+        logger.error('[Server] Falha ao iniciar tarefa.', { jobId, taskName, error });
+        await finalizeJob(jobId, { status: 'failed', error: error.message });
+    }
+}
+
+async function processFilesInBackground(jobId, filesMeta = []) {
+    const firstTask = pipelineConfig.getFirstTask();
+    if (!firstTask) {
+        await finalizeJob(jobId, { status: 'failed', error: 'Pipeline não configurado.' });
+        return;
+    }
+    await startTask(jobId, firstTask, { filesMeta });
+}
 
 // --- Configuração do WebSocket Server ---
 const wss = new WebSocketServer({ server }); // Anexa o WebSocket Server ao servidor HTTP
@@ -132,6 +211,54 @@ wss.on('connection', (ws, req) => {
     logger.warn(`[BFF-WS] Conexão rejeitada: jobId inválido ou não encontrado.`);
     ws.close();
   }
+});
+
+eventBus.on('task:completed', async ({ jobId, taskName, resultPayload, payload }) => {
+    try {
+        const persistable = pickPersistableResult(resultPayload);
+        if (persistable) {
+            await mergeJobResult(jobId, persistable);
+        }
+        const nextTask = pipelineConfig.getNextTask(taskName);
+        if (nextTask) {
+            await startTask(jobId, nextTask, payload || {});
+        } else {
+            await finalizeJob(jobId);
+        }
+    } catch (error) {
+        logger.error('[Server] Falha ao encadear próxima tarefa.', { jobId, taskName, error });
+        await finalizeJob(jobId, { status: 'failed', error: error.message });
+    }
+});
+
+eventBus.on('task:failed', async ({ jobId, taskName, error }) => {
+    const stepIndex = pipelineConfig.getStepIndex(taskName);
+    if (stepIndex !== null) {
+        await updateJobStatus(jobId, stepIndex, 'failed', error);
+    }
+    await finalizeJob(jobId, { status: 'failed', error });
+});
+
+eventBus.on('tool:run', async ({ jobId, toolCall, payload, prompt }) => {
+    try {
+        const toolName = toolCall?.name;
+        const toolFn = toolName ? availableTools?.[toolName] : null;
+        if (!toolFn) {
+            throw new Error(`Ferramenta '${toolName || 'desconhecida'}' não está disponível.`);
+        }
+        const args = toolCall.args || {};
+        const toolResult = await toolFn(args);
+        eventBus.emit('orchestrator:tool_completed', {
+            jobId,
+            toolResult,
+            originalPayload: payload,
+            prompt,
+            toolName,
+        });
+    } catch (err) {
+        logger.error('[Server] Execução de ferramenta falhou.', { jobId, error: err });
+        eventBus.emit('task:failed', { jobId, taskName: 'analysis', error: err.message });
+    }
 });
 
 // --- Lógica do Pipeline Orientado a Eventos ---
@@ -185,20 +312,49 @@ app.use((err, req, res, next) => {
 // --- Funções de Suporte ao Pipeline (usadas pelos agentes e rotas) ---
 
 async function updateJobStatus(jobId, stepIndex, status, info) {
-    const jobString = await redisClient.get(`job:${jobId}`);
-    if (!jobString) return;
-
-    const job = JSON.parse(jobString);
+    const job = await getJob(jobId);
+    if (!job || !Array.isArray(job.pipeline) || !job.pipeline[stepIndex]) return;
 
     job.pipeline[stepIndex].status = status;
-    if (info) job.pipeline[stepIndex].info = info;
+    if (info) {
+        job.pipeline[stepIndex].info = info;
+    }
 
-     // Salva o estado atualizado de volta no Redis
-     await redisClient.set(`job:${jobId}`, JSON.stringify(job));
- 
-     // Envia a atualização via WebSocket
-     const ws = jobConnections.get(jobId); // Encontra a conexão WebSocket do job
-     if (ws && ws.readyState === ws.OPEN) {
-         ws.send(JSON.stringify(job));
-     }
- }
+    await saveJob(jobId, job);
+}
+
+// --- Lógica de Desligamento Gradual (Graceful Shutdown) ---
+
+function gracefulShutdown(signal) {
+    logger.info(`[Server] Sinal de desligamento recebido: ${signal}. Fechando conexões...`);
+    
+    // 1. Para de aceitar novas conexões HTTP
+    server.close(() => {
+        logger.info('[Server] Servidor HTTP fechado.');
+
+        // 2. Fecha a conexão com o Redis
+        redisClient.quit(() => {
+            logger.info('[Redis] Conexão com o Redis fechada.');
+            // 3. Fecha outras conexões (ex: Weaviate, se houver método)
+            // weaviate.close(); 
+            process.exit(0); // Encerra o processo com sucesso
+        });
+    });
+
+    // Força o desligamento após um timeout, caso algo trave
+    setTimeout(() => {
+        logger.error('[Server] Desligamento forçado após timeout. Algumas conexões podem não ter sido fechadas.');
+        process.exit(1);
+    }, 10000); // 10 segundos
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT')); // Captura Ctrl+C
+
+if (!isTestEnv && require.main === module) {
+    server.listen(port, () => {
+        logger.info(`[Server] Servidor iniciado na porta ${port}.`);
+    });
+}
+
+module.exports = { app, server, processFilesInBackground };

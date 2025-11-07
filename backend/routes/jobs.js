@@ -7,6 +7,7 @@ const extractor = require('../services/extractor');
 const { buildAnalysisContext } = require('../services/artifactUtils');
 const exporterService = require('../services/exporter');
 const reconciliationService = require('../services/reconciliation');
+const pipelineConfig = require('../services/pipelineConfig');
 const router = express.Router();
 
 const MAX_CHAT_ATTACHMENTS = parseInt(process.env.CHAT_MAX_ATTACHMENTS || '5', 10);
@@ -181,15 +182,14 @@ module.exports = (context) => {
         }
 
         // Inicializa o status do job
+        const pipelineState = pipelineConfig.buildInitialPipelineState().map(step => ({ ...step }));
+        if (pipelineState[0]) {
+            pipelineState[0].info = `Processando ${storedFiles.length} arquivo(s)...`;
+        }
+
         const newJob = {
             status: 'processing',
-            pipeline: [
-                { name: 'Extração de Dados', status: 'in-progress', info: `Processando ${storedFiles.length} arquivo(s)...` },
-                { name: 'Auditoria Inicial', status: 'pending' },
-                { name: 'Classificação Fiscal', status: 'pending' },
-                { name: 'Análise Executiva (IA)', status: 'pending' },
-                { name: 'Indexação Cognitiva', status: 'pending' },
-            ],
+            pipeline: pipelineState,
             result: null,
             error: null,
             uploadedFiles: storedFiles.map(file => ({
@@ -260,8 +260,21 @@ module.exports = (context) => {
                     return res.status(500).json({ message: 'Não foi possível armazenar os anexos enviados.' });
                 }
 
+                const seenHashes = new Set();
+                const uniqueAttachments = storedAttachments.filter(meta => {
+                    if (seenHashes.has(meta.hash)) {
+                        return false;
+                    }
+                    seenHashes.add(meta.hash);
+                    return true;
+                });
+
+                if (uniqueAttachments.length !== storedAttachments.length) {
+                    logger?.info?.(`[Chat-RAG] Job ${jobId}: ${storedAttachments.length - uniqueAttachments.length} anexos duplicados ignorados.`);
+                }
+
                 try {
-                    attachmentArtifacts = await extractArtifactsFromMetas(storedAttachments, storageService);
+                    attachmentArtifacts = await extractArtifactsFromMetas(uniqueAttachments, storageService);
                     await indexArtifactsInWeaviate(jobId, attachmentArtifacts, weaviate, embeddingModel).catch((error) => {
                         logger?.warn?.(`[Chat-RAG] Job ${jobId}: falha ao indexar anexos.`, { error });
                     });

@@ -26,6 +26,8 @@ const CONTEXT_TRUNCATION_RATIO = 0.9;
 const MAX_RAG_SNIPPETS = parseInt(import.meta.env?.VITE_CHAT_MAX_RAG_SNIPPETS ?? '6', 10);
 const RAG_SNIPPET_LENGTH = parseInt(import.meta.env?.VITE_CHAT_RAG_SNIPPET_LENGTH ?? '600', 10);
 const ATTACHMENT_SNIPPET_LENGTH = parseInt(import.meta.env?.VITE_CHAT_ATTACHMENT_SNIPPET_LENGTH ?? '800', 10);
+const FALLBACK_FILE_LIMIT = parseInt(import.meta.env?.VITE_CHAT_FALLBACK_FILE_LIMIT ?? '3', 10);
+const FALLBACK_CHAR_BUDGET = parseInt(import.meta.env?.VITE_CHAT_FALLBACK_CHAR_BUDGET ?? '12000', 10);
 
 const now = (): number => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
@@ -123,9 +125,14 @@ export async function getChatResponse(
         });
         try {
             const rawContents = await getFullContentForIndexing(processedFiles, logError);
-            fallbackContext = rawContents
-                .map(item => `CONTEÚDO DO ARQUIVO: ${item.fileName}\n\n${item.content}`)
-                .join('\n\n====================\n\n');
+            let remaining = FALLBACK_CHAR_BUDGET;
+            const limited = rawContents.slice(0, FALLBACK_FILE_LIMIT).map(item => {
+                if (remaining <= 0) return null;
+                const snippet = item.content.slice(0, remaining);
+                remaining -= snippet.length;
+                return `CONTEÚDO DO ARQUIVO: ${item.fileName}\n\n${snippet}`;
+            }).filter((block): block is string => Boolean(block));
+            fallbackContext = limited.join('\n\n====================\n\n');
         } catch (error) {
             logError({
                 source: 'ChatService',

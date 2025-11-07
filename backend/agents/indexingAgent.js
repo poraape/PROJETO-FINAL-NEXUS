@@ -14,12 +14,12 @@ function register({ eventBus, updateJobStatus, weaviate }) {
 
             if ((!fileContentsForAnalysis || fileContentsForAnalysis.length === 0) && artifacts.length === 0) {
                 console.warn(`[Indexador] Job ${jobId}: Nenhum conteúdo para indexar. Pulando etapa.`);
-                await updateJobStatus(jobId, 4, 'completed', 'Nenhum conteúdo para indexar.');
+                await updateJobStatus(jobId, 5, 'completed', 'Nenhum conteúdo para indexar.');
                 eventBus.emit('task:completed', { jobId, taskName, resultPayload: {}, payload: payload });
                 return;
             }
 
-            await updateJobStatus(jobId, 4, 'in-progress', 'Ag. Cognitivo: Indexando conteúdo para chat...');
+            await updateJobStatus(jobId, 5, 'in-progress', 'Ag. Cognitivo: Indexando conteúdo para chat...');
             
             // 1. Chunking
             const chunks = (artifacts.length > 0 ? artifacts : fileContentsForAnalysis).flatMap(item => {
@@ -42,7 +42,7 @@ function register({ eventBus, updateJobStatus, weaviate }) {
             const objects = chunks.map((chunk, i) => ({ className: weaviate.className, properties: chunk, vector: embeddings.embeddings[i].values }));
             await weaviate.client.batch.objectsBatcher().withObjects(...objects).do();
 
-            await updateJobStatus(jobId, 4, 'completed');
+            await updateJobStatus(jobId, 5, 'completed');
             eventBus.emit('task:completed', { jobId, taskName, resultPayload: {}, payload: payload });
         } catch (error) {
             eventBus.emit('task:failed', { jobId, taskName, error: `Falha na indexação: ${error.message}` });

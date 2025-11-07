@@ -6,24 +6,24 @@
 
 extraction:
   next: validation
-  stepIndex: 0
+  stepIndex: 0 # Extração de texto
 
 validation:
   next: audit
-  stepIndex: 1
+  stepIndex: 1 # Validação de dados
 
 audit:
   next: classification
-  stepIndex: 1 # Corrigido para ser sequencial após a validação
+  stepIndex: 2 # Auditoria simulada
 
 classification:
   next: analysis
-  stepIndex: 2
+  stepIndex: 3 # Classificação de documentos
 
 analysis:
   next: indexing
-  stepIndex: 3
+  stepIndex: 4 # Análise com IA
 
 indexing:
   next: null # Marca o fim do pipeline
-  stepIndex: 4
+  stepIndex: 5 # Indexação para RAG
