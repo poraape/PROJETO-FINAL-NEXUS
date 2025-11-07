@@ -179,18 +179,6 @@ app.use((err, req, res, next) => {
 
 // --- Funções de Suporte ao Pipeline (usadas pelos agentes e rotas) ---
 
-// Carrega a definição do pipeline a partir do arquivo YAML na inicialização.
-let pipelineDefinition;
-try {
-  pipelineDefinition = yaml.load(fs.readFileSync(path.join(__dirname, 'pipeline.yaml'), 'utf8'));
-  logger.info('[Orquestrador] Definição do pipeline carregada com sucesso.');
-} catch (e) {
-  logger.fatal('ERRO CRÍTICO: Não foi possível carregar o arquivo pipeline.yaml.', { error: e });
-  process.exit(1);
-}
-
-// --- Funções de Suporte ao Pipeline (usadas pelos agentes e rotas) ---
-
 async function updateJobStatus(jobId, stepIndex, status, info) {
     const jobString = await redisClient.get(`job:${jobId}`);
     if (!jobString) return;
