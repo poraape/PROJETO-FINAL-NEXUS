@@ -45,7 +45,122 @@ export interface ExecutiveSummary {
 export interface GeneratedReport {
   executiveSummary: ExecutiveSummary;
   fullTextAnalysis?: string;
+  simulationResult?: SimulationResult;
+  validations?: any[];
+  auditFindings?: AuditFindings;
+  fiscalChecks?: FiscalChecks;
+  classifications?: ClassificationResultPayload;
 }
+
+export interface AuditValidationDetail {
+  cnpj: string | null;
+  status: 'active' | 'inactive' | 'error';
+  message?: string | null;
+  descricaoSituacao?: string | null;
+  razaoSocial?: string | null;
+  regimeSimples?: string | null;
+}
+
+export interface AuditSummary {
+  documentsProcessed: number;
+  totalEstimatedValue: number;
+  totalFindings: number;
+  totalMissingFields: number;
+  highValueDocuments: number;
+  documentsWithUnvalidatedCnpj: number;
+  riskScore: number;
+  riskLevel: 'Baixo' | 'Médio' | 'Alto';
+}
+
+export interface AuditDocumentFinding {
+  fileName: string;
+  detectedCnpjs: string[];
+  missingFields: string[];
+  hasIcms: boolean;
+  hasIpi: boolean;
+  hasPis: boolean;
+  hasCofins: boolean;
+  estimatedTotal: number | null;
+  findings: string[];
+  topMonetaryValues: number[];
+}
+
+export interface AuditFindings {
+  summary: AuditSummary;
+  validations: {
+    total: number;
+    active: number;
+    inactive: number;
+    errors: number;
+    details: AuditValidationDetail[];
+  };
+  documents: AuditDocumentFinding[];
+  alerts: string[];
+  recommendations: string[];
+}
+export interface FiscalCheckDocument {
+  fileName: string;
+  cfops: string[];
+  csts: string[];
+  ncms: string[];
+  icmsBase: number | null;
+  icmsRate: number | null;
+  icmsReported: number | null;
+  icmsExpected: number | null;
+  icmsDifference: number | null;
+  icmsConsistent: boolean | null;
+  observations: string[];
+  invalidCfops?: string[];
+  invalidCsts?: string[];
+}
+
+export interface FiscalCheckSummary {
+  totalDocuments: number;
+  missingCfop: number;
+  missingCst: number;
+  invalidCfop: number;
+  invalidCst: number;
+  icmsConsistent: number;
+  icmsInconsistent: number;
+  flaggedDocuments: number;
+}
+
+export interface FiscalChecks {
+  summary: FiscalCheckSummary;
+  documents: FiscalCheckDocument[];
+}
+
+export type FiscalRiskLevel = 'Baixo' | 'Médio' | 'Alto';
+
+export interface DocumentClassification {
+  fileName: string;
+  tipoOperacao: TipoOperacao;
+  setor: Setor;
+  riskLevel: FiscalRiskLevel;
+  riskScore: number;
+  riskDrivers: string[];
+  issues: string[];
+  cfops: string[];
+  ncms: string[];
+  findings: string[];
+  missingFields: string[];
+  estimatedTotal: number | null;
+}
+
+export interface ClassificationSummary {
+  totalDocuments: number;
+  porTipoOperacao: Record<TipoOperacao, number>;
+  porSetor: Record<Setor, number>;
+  porRisco: Record<FiscalRiskLevel, number>;
+  documentsWithPendingIssues: number;
+  recommendations: string[];
+}
+
+export interface ClassificationResultPayload {
+  summary: ClassificationSummary;
+  documents: DocumentClassification[];
+}
+
 
 export type ErrorSeverity = 'critical' | 'warning' | 'info';
 

@@ -94,7 +94,7 @@ if (!geminiApiKey && !isTestEnv) {
 const jobConnections = new Map(); // Mapeia jobId -> WebSocket
 const jobTimers = new Map();
 
-const PERSISTABLE_RESULT_KEYS = ['executiveSummary', 'simulationResult', 'validations'];
+const PERSISTABLE_RESULT_KEYS = ['executiveSummary', 'simulationResult', 'validations', 'fiscalChecks', 'auditFindings', 'classifications'];
 
 function pickPersistableResult(resultPayload) {
     if (!resultPayload || typeof resultPayload !== 'object') return null;

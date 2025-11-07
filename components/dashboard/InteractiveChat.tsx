@@ -10,6 +10,12 @@ import { storeFeedback } from '../../services/contextMemory.ts';
 
 const ATTACHMENT_DEFAULT_PROMPT = 'Analise os arquivos anexados e traga os principais insights e alertas tributários relacionados.';
 
+const RISK_COLORS: Record<string, string> = {
+    Baixo: 'text-emerald-300',
+    Médio: 'text-amber-300',
+    Alto: 'text-red-400',
+};
+
 const SendIcon: React.FC<React.SVGProps<SVGSVGElement>> = (props) => (
     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" {...props}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M6 12 3.269 3.126A59.768 59.768 0 0 1 21.485 12 59.77 59.77 0 0 1 3.27 20.876L5.999 12Zm0 0h7.5" />
@@ -44,13 +50,25 @@ export const InteractiveChat: React.FC<{
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { logError } = useErrorLog();
 
+  const riskSummary = report.auditFindings?.summary;
+  const riskAlerts = report.auditFindings?.alerts || [];
+  const pendingIssues = report.classifications?.summary?.documentsWithPendingIssues || 0;
+
   useEffect(() => {
-    const introMessage: ChatMessage = {
-      sender: 'ai',
-      content: `Olá! Sou a Nexus AI. O conteúdo dos seus arquivos foi indexado. Agora posso responder perguntas com base em todo o contexto. O que você gostaria de saber?`,
-    };
+    const riskSummary = report.auditFindings?.summary;
+    const alerts = report.auditFindings?.alerts || [];
+    let introText = 'Olá! Sou a Nexus AI. O conteúdo dos seus arquivos foi indexado. Agora posso responder perguntas com base em todo o contexto. O que você gostaria de saber?';
+    if (riskSummary) {
+      const alertSnippet = alerts.slice(0, 2).join('; ');
+      introText = `Olá! Sou a Nexus AI e já revisei os dados fiscais: risco ${riskSummary.riskLevel} (score ${Math.round(riskSummary.riskScore)}).`;
+      if (alertSnippet) {
+        introText += ` Principais alertas: ${alertSnippet}.`;
+      }
+    }
+    const introMessage: ChatMessage = { sender: 'ai', content: introText };
     setMessages([introMessage]);
-  }, [report]);
+    setFeedbackGiven({});
+  }, [jobId, report.auditFindings?.summary?.riskScore]);
   
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -158,6 +176,27 @@ export const InteractiveChat: React.FC<{
     <div id="chat-container" className="bg-bg-secondary backdrop-blur-xl rounded-3xl border border-border-glass shadow-glass p-4 h-full flex flex-col max-h-[calc(100vh-200px)] animate-subtle-bob">
       <h3 className="text-lg font-bold text-content-emphasis mb-4 px-2">Chat Interativo com IA</h3>
       
+      {riskSummary && (
+        <div className="mb-4 bg-white/5 border border-border-glass rounded-2xl px-3 py-3 text-xs">
+          <div className="flex items-center justify-between">
+            <span className="text-content-default/70">Risco agregado do lote</span>
+            <span className={`${RISK_COLORS[riskSummary.riskLevel] || 'text-content-emphasis'} font-semibold`}>score {Math.round(riskSummary.riskScore)}</span>
+          </div>
+          <p className="text-content-emphasis text-sm font-semibold mt-1">Risco {riskSummary.riskLevel}</p>
+          <p className="text-content-default/70 mt-1">Alertas detectados: {riskSummary.totalFindings} · Pendências de classificação: {pendingIssues}</p>
+          {riskAlerts.length > 0 && (
+            <ul className="mt-2 space-y-1 text-content-default/80">
+              {riskAlerts.slice(0, 2).map((alert, idx) => (
+                <li key={idx} className="flex gap-2">
+                  <span className="text-accent">{idx + 1}.</span>
+                  <span className="flex-1">{alert}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
       <div id="chat-messages-container" className="flex-1 overflow-y-auto pr-2 space-y-4">
         {messages.map((msg, index) => (
           <div key={index} className={`flex items-start gap-3 w-full ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}>

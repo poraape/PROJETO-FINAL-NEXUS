@@ -82,6 +82,50 @@ function buildJobStructuredContext(job = {}) {
         if (erroItems.length) lines.push(`Alertas de validação: ${erroItems.join('; ')}`);
     }
 
+    if (payload.fiscalChecks?.summary) {
+        const { flaggedDocuments, icmsInconsistent, missingCfop, missingCst } = payload.fiscalChecks.summary;
+        const fiscalLines = [];
+        if (flaggedDocuments > 0) {
+            fiscalLines.push(`${flaggedDocuments} documento(s) com anotações fiscais.`);
+        }
+        if (icmsInconsistent > 0) {
+            fiscalLines.push(`${icmsInconsistent} divergência(s) de ICMS.`);
+        }
+        if (missingCfop > 0 || missingCst > 0) {
+            fiscalLines.push(`Campos ausentes: CFOP=${missingCfop}, CST=${missingCst}.`);
+        }
+        if (fiscalLines.length > 0) {
+            lines.push(`Resumo de validação fiscal:
+${fiscalLines.join(' ')}`);
+        }
+    }
+
+    if (payload.auditFindings?.summary) {
+        const { riskLevel, riskScore, totalFindings, highValueDocuments } = payload.auditFindings.summary;
+        lines.push(`Resumo da auditoria: ${totalFindings} alerta(s), risco ${riskLevel} (score ${riskScore}).`);
+        if (typeof highValueDocuments === 'number' && highValueDocuments > 0) {
+            lines.push(`Documentos de alto valor revisados: ${highValueDocuments}.`);
+        }
+        if (Array.isArray(payload.auditFindings.alerts) && payload.auditFindings.alerts.length > 0) {
+            const topAlerts = payload.auditFindings.alerts
+                .slice(0, 3)
+                .map((alert, index) => `${index + 1}. ${alert}`)
+                .join('\n');
+            lines.push(`Principais alertas:
+${topAlerts}`);
+        }
+    }
+
+    if (payload.classifications?.summary) {
+        const { porRisco, documentsWithPendingIssues } = payload.classifications.summary;
+        lines.push(`Classificação fiscal: risco alto em ${porRisco?.Alto || 0} documento(s), pendências em ${documentsWithPendingIssues}.`);
+        const recs = payload.classifications.summary.recommendations || [];
+        if (recs.length > 0) {
+            lines.push(`Recomendações da classificação:
+${recs.slice(0, 3).map((r, idx) => `${idx + 1}. ${r}`).join('\n')}`);
+        }
+    }
+
     if (Array.isArray(job.uploadedFiles) && job.uploadedFiles.length > 0) {
         const fileLines = job.uploadedFiles
             .slice(0, 5)
