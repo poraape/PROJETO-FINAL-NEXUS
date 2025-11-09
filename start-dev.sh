@@ -108,7 +108,7 @@ echo -e "\n${YELLOW}▶️  Preparando o Backend...${NC}"
 
 if [ ! -d "node_modules" ] || [ "package-lock.json" -nt "node_modules" ]; then
     echo -e "${BLUE}   - Instalando ou atualizando dependências do Node.js (npm install)...${NC}"
-    npm install # Instala dependências da raiz, incluindo as do workspace do backend
+    cmd.exe /c "npm install" # Força o uso do npm do Windows via cmd.exe
 else
     echo -e "${GREEN}   - Dependências do Node.js já estão atualizadas. Pulando instalação.${NC}"
 fi
@@ -117,7 +117,7 @@ cd backend
 
 echo -e "${BLUE}   - Iniciando o servidor Backend (Node.js) em background...${NC}"
 # Inicia o servidor em background e redireciona a saída para um log
-node server.js > ../backend.log 2>&1 &
+node.exe server.js > ../backend.log 2>&1 & # Força o uso do node.exe do Windows
 BACKEND_PID=$!
 
 # Função para parar os processos em background ao sair do script (Ctrl+C)
@@ -173,7 +173,7 @@ echo -e "   - Log do frontend em: ${BLUE}frontend.log${NC}"
 echo -e "(Pressione ${YELLOW}Ctrl+C${NC} para finalizar todos os processos)"
 
 # Inicia o servidor frontend em background e redireciona a saída para um log
-npm run dev -- --host 0.0.0.0 --port 8000 --strictPort > frontend.log 2>&1 &
+cmd.exe /c "npm run dev -- --host 0.0.0.0 --port 8000 --strictPort" > frontend.log 2>&1 &
 FRONTEND_PID=$!
 
 wait # Espera por Ctrl+C para chamar a função cleanup

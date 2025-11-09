@@ -7,7 +7,12 @@ import { ErrorLogModal } from './components/ErrorLogModal.tsx';
 import { INITIAL_PIPELINE_STEPS } from './constants.ts';
 import { GeneratedReport, PipelineStep, ProcessingStepStatus, Theme } from './types.ts';
 import { useErrorLog } from './hooks/useErrorLog.ts';
-import { clearContext, getLastReportSummary } from './services/contextMemory.ts';
+import {
+  clearContext,
+  getLastReportSummary,
+  getLastGeneratedReport,
+  storeLastGeneratedReport,
+} from './services/contextMemory.ts';
 import { iniciarAuditoriaAutomatica } from './services/auditorAgent.ts';
 import { buildBackendHttpUrl, buildBackendWsUrl } from './config.ts';
 
@@ -33,6 +38,13 @@ function App() {
     const initializeApp = () => {
         iniciarAuditoriaAutomatica();
         console.log("[App Init] Application ready. Using secure embedded API key.");
+        const lastReport = getLastGeneratedReport();
+        if (lastReport) {
+            setGeneratedReport(lastReport);
+            setUploadInfo("Sessão anterior restaurada a partir da memória cognitiva.");
+            setView('dashboard');
+            return;
+        }
         const lastSummary = getLastReportSummary();
         if (lastSummary) {
             setGeneratedReport({ executiveSummary: lastSummary, fullTextAnalysis: undefined });
@@ -103,7 +115,10 @@ function App() {
         setPipelineSteps(jobStatus.pipeline);
 
         if (jobStatus.status === 'completed') {
-          setGeneratedReport(jobStatus.result);
+          if (jobStatus.result) {
+            setGeneratedReport(jobStatus.result);
+            storeLastGeneratedReport(jobStatus.result);
+          }
           setView('dashboard');
           jobFinalized = true;
           ws.close();

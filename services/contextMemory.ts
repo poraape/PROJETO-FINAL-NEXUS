@@ -1,10 +1,18 @@
 // Fix: Consolidating and exporting all context management functions to resolve multiple import errors.
-import { ExecutiveSummary, SimulationResult, SimulationParams, ClassificationResult, ForecastResult } from '../types.ts';
+import {
+    ExecutiveSummary,
+    GeneratedReport,
+    SimulationResult,
+    SimulationParams,
+    ClassificationResult,
+    ForecastResult,
+} from '../types.ts';
 
 const CONTEXT_PREFIX = 'NEXUS_CTX_';
 
 const CONTEXT_KEYS = {
     LAST_REPORT_SUMMARY: 'LAST_REPORT_SUMMARY',
+    LAST_GENERATED_REPORT: 'LAST_GENERATED_REPORT',
     SIMULATION_CACHE: 'SIMULATION_CACHE',
     DOCUMENT_INDEX: 'DOCUMENT_INDEX',
     QA_CACHE: 'QA_CACHE',
@@ -52,6 +60,8 @@ export const clearContext = (): void => {
 
 export const storeLastReportSummary = (summary: ExecutiveSummary) => storeContext(CONTEXT_KEYS.LAST_REPORT_SUMMARY, summary);
 export const getLastReportSummary = (): ExecutiveSummary | null => getContext<ExecutiveSummary>(CONTEXT_KEYS.LAST_REPORT_SUMMARY);
+export const storeLastGeneratedReport = (report: GeneratedReport) => storeContext(CONTEXT_KEYS.LAST_GENERATED_REPORT, report);
+export const getLastGeneratedReport = (): GeneratedReport | null => getContext<GeneratedReport>(CONTEXT_KEYS.LAST_GENERATED_REPORT);
 
 const getSimulationCache = (): Record<string, SimulationResult> => getContext<Record<string, SimulationResult>>(CONTEXT_KEYS.SIMULATION_CACHE) || {};
 export const storeSimulationResult = (params: SimulationParams, result: SimulationResult) => {

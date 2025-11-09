@@ -13,7 +13,8 @@ const logger = require('./services/logger').child({ module: 'server' });
 const metrics = require('./services/metrics');
 const storageService = require('./services/storage');
 const pipelineConfig = require('./services/pipelineConfig');
-const { availableTools } = require('./services/geminiClient');
+const { availableTools, model, embeddingModel } = require('./services/geminiClient');
+const { registerLangChainOrchestrator } = require('./langchain/orchestrator');
 
 storageService.init();
 
@@ -94,7 +95,14 @@ if (!geminiApiKey && !isTestEnv) {
 const jobConnections = new Map(); // Mapeia jobId -> WebSocket
 const jobTimers = new Map();
 
-const PERSISTABLE_RESULT_KEYS = ['executiveSummary', 'simulationResult', 'validations'];
+const PERSISTABLE_RESULT_KEYS = [
+    'executiveSummary',
+    'simulationResult',
+    'validations',
+    'langChainAudit',
+    'langChainAuditFindings',
+    'langChainClassification',
+];
 
 function pickPersistableResult(resultPayload) {
     if (!resultPayload || typeof resultPayload !== 'object') return null;
@@ -294,12 +302,15 @@ eventBus.on('tool:run', async ({ jobId, toolCall, payload, prompt }) => {
 const sharedContext = { // Objeto de dependências injetado nas rotas e agentes
     updateJobStatus,
     finalizeJob,
+    mergeJobResult,
     eventBus,
     weaviate,
     redisClient,
     upload, // Instância do multer
     geminiApiKey,
     processFilesInBackground,
+    model,
+    embeddingModel,
     logger: logger.child({ module: 'sharedContext' }),
     metrics,
     storageService,
@@ -311,6 +322,7 @@ const registerRoutes = require('./routes');
 registerRoutes(app, sharedContext);
 
 registerAgents(sharedContext); // Registra os listeners dos agentes
+registerLangChainOrchestrator(sharedContext);
 
 // Middleware de tratamento de erros globais (upload e demais)
 app.use((err, req, res, next) => {

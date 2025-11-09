@@ -11,6 +11,7 @@ import { AuditInsightsPanel } from './AuditInsightsPanel.tsx';
 import { CompareIcon } from '../icons/CompareIcon.tsx';
 import { ComparativeAnalysis } from './ComparativeAnalysis.tsx';
 import { generateComparativeAnalysis } from '../../services/geminiService.ts';
+import { LangChainInsightsPanel } from './LangChainInsightsPanel.tsx';
 
 interface DashboardProps {
   initialReport: GeneratedReport;
@@ -137,6 +138,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ initialReport, processedFi
                 fiscalChecks={report.fiscalChecks}
               />
             )}
+            <LangChainInsightsPanel report={report} />
             <InteractiveChat
               report={report}
               simulationResult={simulationResult}

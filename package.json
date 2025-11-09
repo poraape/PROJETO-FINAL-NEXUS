@@ -16,7 +16,7 @@
     "docx": "8.5.0",
     "html2canvas": "1.4.1",
     "js-yaml": "^4.1.0",
-    "jspdf": "2.5.1",
+    "jspdf": "^3.0.3",
     "jszip": "3.10.1",
     "papaparse": "5.4.1",
     "pdfjs-dist": "4.3.136",

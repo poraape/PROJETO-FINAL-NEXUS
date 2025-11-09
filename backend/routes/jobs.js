@@ -139,46 +139,58 @@ function buildAttachmentContextFromArtifacts(artifacts = []) {
     return context;
 }
 
-async function indexArtifactsInWeaviate(jobId, artifacts = [], weaviate, embeddingModel) {
-    if (!artifacts.length || !weaviate?.client?.batch?.objectsBatcher || !embeddingModel?.batchEmbedContents) {
-        return;
-    }
-
+function createChunksFromArtifacts(artifacts, jobId) {
     const chunks = artifacts.flatMap(artifact => {
         const baseChunks = Array.isArray(artifact.chunks) && artifact.chunks.length > 0
             ? artifact.chunks
             : (artifact.text || '').match(/.{1,2000}/gs) || [];
 
         return baseChunks
-            .filter(chunkContent => typeof chunkContent === 'string' && chunkContent.trim().length > 0)
+            .filter(chunkContent => typeof chunkContent === 'string' && chunkContent.trim().length > 10) // Ignore very small chunks
             .map((chunkContent, index) => ({
                 jobId,
                 fileName: artifact.fileName,
                 content: chunkContent,
                 sourceHash: artifact.hash,
                 chunkIndex: index,
-                summary: artifact.summary,
+                summary: artifact.summary || '',
             }));
     });
+    return chunks;
+}
 
+async function getEmbeddingsForChunks(chunks, embeddingModel) {
+    if (!chunks.length || !embeddingModel?.batchEmbedContents) return [];
+
+    try {
+        const { embeddings } = await embeddingModel.batchEmbedContents({
+            requests: chunks.map(chunk => ({ model: "models/text-embedding-004", content: chunk.content })),
+        });
+        return embeddings || [];
+    } catch (error) {
+        logger?.warn?.(`[WeaviateIndexer] Falha ao gerar embeddings em lote.`, { error: error.message });
+        return [];
+    }
+}
+
+async function indexArtifactsInWeaviate(jobId, artifacts = [], weaviate, embeddingModel) {
+    if (!artifacts.length || !weaviate?.client?.batch?.objectsBatcher) return;
+
+    const chunks = createChunksFromArtifacts(artifacts, jobId);
     if (chunks.length === 0) return;
 
-    const embeddings = await embeddingModel.batchEmbedContents({
-        requests: chunks.map(chunk => ({ model: "models/text-embedding-004", content: chunk.content })),
-    }).catch(() => ({ embeddings: [] }));
-
-    const vectors = embeddings?.embeddings || [];
+    const vectors = await getEmbeddingsForChunks(chunks, embeddingModel);
     const objects = chunks
         .map((chunk, index) => ({
             className: weaviate.className,
             properties: chunk,
-            vector: vectors[index]?.values || [],
+            vector: vectors[index]?.values,
         }))
         .filter(obj => Array.isArray(obj.vector) && obj.vector.length > 0);
 
-    if (!objects.length) return;
-
-    await weaviate.client.batch.objectsBatcher().withObjects(...objects).do();
+    if (objects.length > 0) {
+        await weaviate.client.batch.objectsBatcher().withObjects(...objects).do();
+    }
 }
 
 module.exports = (context) => {
@@ -399,12 +411,13 @@ Responda em português, com precisão factual. Se precisar usar ferramentas (ex.
             res.status(200).json({ answer });
         } catch (error) {
             logger?.error?.(`[Chat-RAG] Erro no job ${jobId}:`, { error });
-            // Fornece uma mensagem de erro mais genérica para o cliente por segurança,
-            // mas mantém os detalhes no log do servidor.
-            const userMessage = error.message.includes('fetch') || error.message.includes('ECONNREFUSED')
-                ? 'Falha de comunicação com um serviço externo. Tente novamente mais tarde.'
-                : 'Falha interna ao processar a pergunta.';
-            res.status(500).json({ message: userMessage });
+            // Provide a more generic error message to the client for security,
+            // but keep the details in the server log.
+            const isNetworkError = error.message.includes('fetch') || error.message.includes('ECONNREFUSED');
+            const userMessage = isNetworkError
+                ? 'A comunicação com um serviço externo falhou. Por favor, tente novamente mais tarde.'
+                : 'Ocorreu uma falha interna ao processar a sua pergunta.';
+            res.status(500).json({ message: userMessage, code: isNetworkError ? 'EXTERNAL_SERVICE_FAILURE' : 'INTERNAL_ERROR' });
         }
     });
 
@@ -465,7 +478,7 @@ Responda em português, com precisão factual. Se precisar usar ferramentas (ex.
             });
         } catch (error) {
             logger?.error?.(`[Exports] Job ${jobId}: falha ao gerar exportação.`, { error });
-            res.status(500).json({ message: 'Falha ao gerar a exportação solicitada.', details: error.message });
+            res.status(500).json({ message: 'Falha interna ao gerar a exportação solicitada.' });
         }
     });
 
@@ -503,7 +516,7 @@ Responda em português, com precisão factual. Se precisar usar ferramentas (ex.
             res.status(200).json(result);
         } catch (error) {
             logger?.error?.(`[Reconciliation] Job ${jobId}: falha ao conciliar extratos.`, { error });
-            res.status(500).json({ message: 'Falha ao executar a conciliação bancária.', details: error.message });
+            res.status(500).json({ message: 'Falha interna ao executar a conciliação bancária.' });
         }
     });
 

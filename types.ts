@@ -50,6 +50,9 @@ export interface GeneratedReport {
   auditFindings?: AuditFindings;
   fiscalChecks?: FiscalChecks;
   classifications?: ClassificationResultPayload;
+  langChainAudit?: string;
+  langChainAuditFindings?: string;
+  langChainClassification?: string;
 }
 
 export interface AuditValidationDetail {
