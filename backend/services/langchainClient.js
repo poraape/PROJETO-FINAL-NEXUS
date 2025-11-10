@@ -35,7 +35,6 @@ async function loadModules() {
     modulesLoaded = {
         RunnableSequence: coreRunnables.RunnableSequence,
         ChatPromptTemplate: corePrompts.ChatPromptTemplate,
-        MessagesPlaceholder: corePrompts.MessagesPlaceholder,
         JsonOutputParser: coreParsers.JsonOutputParser,
         StringOutputParser: coreParsers.StringOutputParser,
         ChatGoogleGenerativeAI: googleGenAI.ChatGoogleGenerativeAI,

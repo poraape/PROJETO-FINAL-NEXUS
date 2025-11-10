@@ -41,7 +41,7 @@ flowchart LR
 
 | Domínio | Descrição | Artefatos-chave |
 | --- | --- | --- |
-| Frontend SPA | React 18 + Vite 6.2, componentes Tremor, Tailwind (CDN). Carrega `App.tsx`, memória cognitiva em `contexts/` e serviços em `services/`. | `App.tsx`, `components/`, `services/*.ts`, `config.ts`, `contexts/` |
+| Frontend SPA | React 18.3 + Vite 6.4, componentes Tremor, Tailwind (CDN). Carrega `App.tsx`, memória cognitiva em `contexts/` e serviços em `services/`. | `App.tsx`, `components/`, `services/*.ts`, `config.ts`, `contexts/` |
 | Backend BFF | Express + WebSocket Server; rotas em `backend/routes`; pipeline multiagente em `backend/agents`; storage local e ferramentas Gemini. | `backend/server.js`, `backend/routes/`, `backend/agents/`, `backend/services/` |
 | Infraestrutura | Redis para estado/cache, Weaviate para RAG, BullMQ workers, Docker Compose para dev. | `docker-compose.yml`, `.uploads/`, `weaviate_data/`, `backend/services/queue.js` |
 | CI / Automação | GitHub Actions `ci.yml` executa `npm ci`, testes backend e `npm run build`. Script `start-dev.sh` levanta todo o stack localmente. | `.github/workflows/ci.yml`, `start-dev.sh` |
@@ -83,12 +83,12 @@ Eventos (`eventBus`) acionam filas BullMQ (`backend/services/queue.js`). O estad
 
 | Tecnologia | Versão | Uso |
 | --- | --- | --- |
-| React | ^18.2.0 | SPA, hooks e ecossistema. |
-| Vite | ^6.2.0 | Dev server/build. |
-| TypeScript | ~5.8.2 | Tipagem estática. |
-| Tremor React | 3.17.2 | Dashboards/gráficos. |
+| React | 18.3.1 | SPA, hooks e ecossistema. |
+| Vite | 6.4.1 | Dev server/build. |
+| TypeScript | 5.8.3 | Tipagem estática. |
+| Tremor React | 3.18.7 | Dashboards/gráficos. |
 | Tailwind CSS | 3.x (CDN) | Estilização utility-first. |
-| @google/genai | ^1.28.0 | Cliente Gemini no browser (proxy via BFF). |
+| @google/genai | 1.29.0 | Cliente Gemini no browser (proxy via BFF). |
 | jsPDF / docx / html2canvas | 2.5.1 / 8.5.0 / 1.4.1 | Exportação de relatórios. |
 | tesseract.js, pdfjs-dist, PapaParse, xml-js, jszip | 5.1.0 / 4.3.136 / 5.4.1 / 1.6.11 / 3.10.1 | Parsing/OCR/ZIP local. |
 
@@ -97,14 +97,16 @@ Eventos (`eventBus`) acionam filas BullMQ (`backend/services/queue.js`). O estad
 | Tecnologia | Versão | Uso |
 | --- | --- | --- |
 | Node.js (recomendado ≥18) | — | Runtime. |
-| Express | ^4.19.2 | API HTTP/WS BFF. |
-| ws | ^8.18.3 | WebSocket server. |
-| BullMQ | ^5.15.0 | Filas/Workers. |
-| redis (cliente) | ^4.6.13 | Estado de jobs/cache. |
-| @google/genai | ^0.11.0 | Chamadas Gemini server-side. |
-| weaviate-ts-client | ^2.0.0 | CRUD de vetores RAG. |
-| multer, uuid, joi | ^1.4.5 / ^9.0.1 / ^17.13.1 | Upload, IDs e validação. |
-| pdf-parse, mammoth, xlsx, csv-parse | — | Extração de artefatos server-side. |
+| Express | 4.21.2 | API HTTP/WS BFF. |
+| ws | 8.18.3 | WebSocket server. |
+| BullMQ | 5.63.0 | Filas/Workers. |
+| redis (cliente) | 4.7.1 | Estado de jobs/cache. |
+| @google/genai | 1.29.0 | Chamadas Gemini server-side. |
+| @langchain/core | 0.3.79 | Cadeias LangChain customizadas. |
+| @langchain/google-genai | 0.1.12 | LLM e embeddings Gemini via LangChain. |
+| weaviate-ts-client | 2.2.0 | CRUD de vetores RAG. |
+| multer, uuid, joi | 1.4.5-lts.2 / 9.0.1 / 17.13.3 | Upload, IDs e validação. |
+| pdf-parse, mammoth, xlsx, csv-parse | 2.4.5 / 1.11.0 / 0.18.5 / 5.6.0 | Extração de artefatos server-side. |
 
 ### Infraestrutura
 
