@@ -40,6 +40,12 @@
     "supertest": "^7.0.0"
   },
   "jest": {
-    "testEnvironment": "node"
+    "testEnvironment": "node",
+    "setupFiles": [
+      "./jest.setup.js"
+    ],
+    "moduleNameMapper": {
+      "^file-type$": "<rootDir>/file-type-mock.js"
+    }
   }
 }

@@ -201,9 +201,13 @@ wss.on('connection', (ws, req) => {
             if (ws.readyState === ws.OPEN) {
                 ws.send(JSON.stringify({ jobId, status: 'not_found', error: `Job com ID ${jobId} não encontrado.` }));
             }
+        } else if (!jobString && ws.readyState === ws.OPEN) {
+            // Se o job não for encontrado, informa o cliente.
+            ws.send(JSON.stringify({ error: `Job com ID ${jobId} não encontrado.` }));
         }
     }).catch(err => {
         logger.error(`[BFF-WS] Erro ao buscar job ${jobId} do Redis para conexão inicial.`, { error: err });
+        logger.error(`[BFF-WS] Erro ao buscar job ${jobId} do Redis:`, { error: err });
         // Informa o cliente sobre a falha interna.
         ws.send(JSON.stringify({ error: 'Ocorreu um erro interno ao buscar os dados do job.' }));
     });
@@ -243,7 +247,8 @@ eventBus.on('task:completed', async ({ jobId, taskName, resultPayload, payload }
         }
         const nextTask = pipelineConfig.getNextTask(taskName);
         if (nextTask) {
-            await startTask(jobId, nextTask, payload || {});
+            const nextPayload = { ...(payload || {}), ...(resultPayload || {}) };
+            await startTask(jobId, nextTask, nextPayload);
         } else {
             await finalizeJob(jobId);
         }
@@ -351,14 +356,17 @@ function gracefulShutdown(signal) {
     logger.info(`[Server] Sinal de desligamento recebido: ${signal}. Fechando conexões...`);
     
     // 1. Para de aceitar novas conexões HTTP e notifica clientes WebSocket
+    // 1. Para de aceitar novas conexões HTTP
     server.close(() => {
         clearInterval(wsHealthCheckInterval); // Limpa o intervalo de health check do WS
         logger.info('[Server] Servidor HTTP fechado.');
 
         // 3. Fecha a conexão com o Redis
+        // 2. Fecha a conexão com o Redis
         redisClient.quit(() => {
             logger.info('[Redis] Conexão com o Redis fechada.');
             // 4. Fecha outras conexões (ex: Weaviate, se houver método)
+            // 3. Fecha outras conexões (ex: Weaviate, se houver método)
             // weaviate.close(); 
             process.exit(0); // Encerra o processo com sucesso
         });
