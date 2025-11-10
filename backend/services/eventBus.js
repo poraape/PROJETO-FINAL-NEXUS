@@ -1,5 +1,6 @@
 const EventEmitter = require('events');
 const { queues, registerWorker } = require('./queue');
+const metrics = require('./metrics');
 
 const emitter = new EventEmitter();
 
@@ -30,6 +31,7 @@ async function emit(eventName, payload) {
             throw new Error(`Queue '${taskName}' not configured.`);
         }
         await queue.add(taskName, { jobId, payload: dataPayload }, { removeOnComplete: true });
+        metrics.incrementCounter(`queue_${taskName}_enqueued_total`);
         return;
     }
     emitter.emit(eventName, payload);

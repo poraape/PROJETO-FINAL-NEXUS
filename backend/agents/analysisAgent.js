@@ -1,96 +1,85 @@
 // backend/agents/analysisAgent.js
 
-const { model, availableTools } = require('../services/geminiClient');
 const { buildAnalysisContext } = require('../services/artifactUtils');
 
-function robustJsonParse(jsonString) {
-    // Tenta extrair o JSON de um bloco de código Markdown
-    const match = /```json\n([\s\S]*?)\n```/.exec(jsonString);
-    if (match && match[1]) {
-        try {
-            return JSON.parse(match[1]);
-        } catch (e) {
-            // Se a extração falhar, pode ser que o JSON esteja malformado
-            throw new Error(`Falha ao analisar o JSON extraído do bloco de código: ${e.message}`);
-        }
-    }
-    // Fallback para o caso de a IA retornar JSON puro (sem o Markdown)
-    try {
-        return JSON.parse(jsonString);
-    } catch (e) {
-        throw new Error(`A resposta não é um JSON válido nem um bloco de código JSON: ${e.message}`);
-    }
-}
+const TASK_NAME = 'analysis';
 
-function estimateTokens(text) {
-    return Math.ceil((text || '').length / 4);
-}
-
-function register({ eventBus, updateJobStatus, metrics }) {
+function register({ eventBus, updateJobStatus, metrics, getJob, getJobContext, langchainBridge, langchainClient }) {
     // Agente de Análise (IA)
     eventBus.on('task:start', async ({ jobId, taskName, payload }) => {
-        if (taskName !== 'analysis') return;
+        if (taskName !== TASK_NAME) return;
         try {
-            const artifacts = payload.artifacts || [];
-            const fileContentsForAnalysis = payload.fileContentsForAnalysis || artifacts.map(art => ({ fileName: art.fileName, content: art.text }));
+            metrics?.incrementCounter?.('agent_analysis_started_total');
+            const persistedContext = getJobContext ? await getJobContext(jobId) : null;
+            const mergedPayload = {
+                ...(persistedContext?.lastPayload || {}),
+                ...(payload || {}),
+            };
+            const jobState = getJob ? await getJob(jobId) : null;
+            const contextHash = jobState?.metadata?.contextHash;
+            const cachedSummary = langchainBridge?.getCachedResponse?.(jobId, TASK_NAME, contextHash || '');
+            if (cachedSummary?.payload) {
+                await updateJobStatus(jobId, 4, 'completed', 'Resumo recuperado do cache semântico.');
+                eventBus.emit('task:completed', {
+                    jobId,
+                    taskName,
+                    resultPayload: { executiveSummary: cachedSummary.payload },
+                    payload: mergedPayload,
+                });
+                return;
+            }
+
+            const artifacts = mergedPayload.artifacts || [];
+            const fileContentsForAnalysis = mergedPayload.fileContentsForAnalysis || artifacts.map(art => ({ fileName: art.fileName, content: art.text }));
             await updateJobStatus(jobId, 4, 'in-progress', 'Ag. Inteligência: Gerando análise executiva...');
             const { context, stats } = buildAnalysisContext(artifacts);
 
-            const prompt = `
-Você é um analista fiscal especializado. Com base nos dados agregados e nos resumos abaixo, produza um JSON seguindo a estrutura:
-{
-  "title": string,
-  "description": string,
-  "keyMetrics": {
-    "numeroDeDocumentosValidos": number,
-    "valorTotalDasNfes": number,
-    "valorTotalDosProdutos": number,
-    "indiceDeConformidadeICMS": string,
-    "nivelDeRiscoTributario": string,
-    "estimativaDeNVA": number
-  },
-  "actionableInsights": [{ "text": string }],
-  "simulationResult": object | null
-}
+            const pipelineOverview = Array.isArray(jobState?.pipeline)
+                ? jobState.pipeline.map(step => `${step.name}: ${step.status}`).join(' | ')
+                : 'Indefinido';
 
-Use as estatísticas agregadas e o contexto resumido. Os dados já foram pré-validados por outros agentes.
-Se identificar que o valor total das notas supera 100000, use a ferramenta 'tax_simulation' com regime 'Lucro Real'.
-Se encontrar um tópico fiscal complexo ou uma dúvida sobre legislação (ex: "crédito presumido", "substituição tributária"), use a ferramenta 'consult_fiscal_legislation' para buscar esclarecimentos antes de formular seus insights.
-Não use ferramentas para validações simples como CNPJ, pois isso já foi feito.
+            const digest = jobState?.contextDigest
+                ? `Último payload (${jobState.contextDigest.summary?.keys?.join(', ') || 'n/d'}) atualizado em ${jobState.contextDigest.updatedAt || 'n/d'}`
+                : 'Digest não disponível.';
 
-Estatísticas agregadas:
-${JSON.stringify(stats, null, 2)}
+            const conversationTranscript = langchainBridge?.buildTranscript?.(jobId);
 
-Contexto resumido:
-${context || fileContentsForAnalysis.map(f => `### Documento: ${f.fileName}\n${(f.content || '').slice(0, 1200)}`).join('\n\n')}
-`;
+            langchainBridge?.appendMemory?.(jobId, 'system', 'Pipeline encaminhou análise executiva com novo contexto via LangChain.', { task: TASK_NAME });
 
-            const tokens = estimateTokens(prompt);
-            if (metrics && typeof metrics.observeSummary === 'function') {
-                metrics.observeSummary('analysis_prompt_tokens', tokens);
-            }
-
-            const chat = model.startChat({
-                tools: availableTools,
-                config: { responseMimeType: 'application/json' },
+            const langchainResponse = await langchainClient.runAnalysis({
+                jobId,
+                stats,
+                context: context || fileContentsForAnalysis.map(f => `### Documento: ${f.fileName}\n${(f.content || '').slice(0, 1200)}`).join('\n\n'),
+                pipelineOverview,
+                digest,
+                conversationTranscript,
+                contextHash,
             });
 
-            const result = await chat.sendMessage(prompt);
-            const call = result.response.functionCalls()?.[0];
+            const { executiveSummary, toolRequest } = langchainResponse || {};
 
-            if (call) {
-                console.log(`[AnalysisAgent] Job ${jobId}: IA solicitou o uso da ferramenta '${call.name}'. Acionando o ToolsAgent.`);
-                // A IA quer usar uma ferramenta. Pausamos esta tarefa e pedimos ao Orquestrador para executar a ferramenta.
-                eventBus.emit('tool:run', { jobId, toolCall: call, payload, prompt });
-                // A continuação ocorrerá quando o Orquestrador receber 'tool:completed'
-            } else {
-                // A IA respondeu diretamente.
-                const executiveSummary = robustJsonParse(result.response.text());
+            if (toolRequest?.name) {
+                langchainBridge?.appendMemory?.(jobId, 'assistant', `LangChain requisitou a ferramenta ${toolRequest.name}.`, { type: 'tool_request' });
+                eventBus.emit('tool:run', {
+                    jobId,
+                    toolCall: { name: toolRequest.name, args: toolRequest.args || {} },
+                    payload: mergedPayload,
+                    prompt: JSON.stringify({ stats, digest, context }),
+                });
+            } else if (executiveSummary) {
                 await updateJobStatus(jobId, 4, 'completed');
-                eventBus.emit('task:completed', { jobId, taskName, resultPayload: { executiveSummary }, payload: payload });
+                metrics?.incrementCounter?.('agent_analysis_completed_total');
+                if (contextHash) {
+                    langchainBridge?.cacheSemanticResponse?.(jobId, TASK_NAME, contextHash, executiveSummary);
+                }
+                langchainBridge?.appendMemory?.(jobId, 'assistant', `Resumo elaborado via LangChain: ${executiveSummary.title || 'Sem título'}`, { task: TASK_NAME });
+                eventBus.emit('task:completed', { jobId, taskName, resultPayload: { executiveSummary }, payload: mergedPayload });
+            } else {
+                throw new Error('LangChain retornou uma resposta vazia para a análise.');
             }
 
         } catch (error) {
+            metrics?.incrementCounter?.('agent_analysis_failed_total');
             eventBus.emit('task:failed', { jobId, taskName, error: `Falha na análise da IA: ${error.message}` });
         }
     });
@@ -99,22 +88,34 @@ ${context || fileContentsForAnalysis.map(f => `### Documento: ${f.fileName}\n${(
     eventBus.on('orchestrator:tool_completed', async ({ jobId, toolResult, originalPayload, prompt, toolName }) => {
         try {
             console.log(`[Orquestrador] Job ${jobId}: Resultado da ferramenta recebido. Devolvendo ao Agente de Análise.`);
-            const followUpPrompt = `
-${prompt}
-
-Resultado da ferramenta '${toolName || 'tax_simulation'}':
-${JSON.stringify(toolResult, null, 2)}
-
-Atualize o JSON final seguindo exatamente a mesma estrutura definida anteriormente.`.trim();
-
-            const result = await model.generateContent({
-                contents: [{ parts: [{ text: followUpPrompt }] }],
-                generationConfig: { responseMimeType: 'application/json' },
+            const jobState = getJob ? await getJob(jobId) : null;
+            const contextHash = jobState?.metadata?.contextHash;
+            const langchainResponse = await langchainClient.runAnalysis({
+                jobId,
+                stats: {},
+                context: prompt || '',
+                pipelineOverview: 'Follow-up após execução de ferramenta.',
+                digest: `Ferramenta ${toolName}`,
+                conversationTranscript: langchainBridge?.buildTranscript?.(jobId),
+                contextHash,
+                toolResult: {
+                    toolName,
+                    output: toolResult,
+                },
             });
 
-            const executiveSummary = robustJsonParse(result.response.text());
+            const executiveSummary = langchainResponse?.executiveSummary;
+            if (!executiveSummary) {
+                throw new Error('LangChain não retornou resumo após a ferramenta.');
+            }
+
             await updateJobStatus(jobId, 4, 'completed', 'Análise com simulação concluída.');
-            eventBus.emit('task:completed', { jobId, taskName: 'analysis', resultPayload: { executiveSummary }, payload: originalPayload });
+            metrics?.incrementCounter?.('agent_analysis_completed_total');
+            if (contextHash) {
+                langchainBridge?.cacheSemanticResponse?.(jobId, TASK_NAME, contextHash, executiveSummary);
+            }
+            langchainBridge?.appendMemory?.(jobId, 'assistant', `Resumo final após ${toolName}: ${executiveSummary.title || 'Sem título'}`, { task: TASK_NAME, tool: toolName });
+            eventBus.emit('task:completed', { jobId, taskName: TASK_NAME, resultPayload: { executiveSummary }, payload: originalPayload });
 
         } catch (error) {
             eventBus.emit('task:failed', { jobId, taskName: 'analysis', error: `Falha na etapa de síntese pós-ferramenta: ${error.message}` });

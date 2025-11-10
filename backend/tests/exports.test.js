@@ -10,6 +10,12 @@ const mockRedisClient = {
 
 jest.mock('../services/redisClient', () => mockRedisClient);
 jest.mock('../services/eventBus', () => ({ emit: jest.fn(), on: jest.fn() }));
+jest.mock('../services/langchainClient', () => ({
+    diagnostics: jest.fn().mockResolvedValue({ ready: true }),
+    runChat: jest.fn(),
+    runAnalysis: jest.fn(),
+    reset: jest.fn(),
+}));
 
 jest.mock('../services/exporter', () => {
     const summarizeDoc = jest.fn(doc => doc);
@@ -52,10 +58,10 @@ jest.mock('../services/geminiClient', () => ({
     availableTools: {},
 }));
 
-const request = require('supertest');
 const exporterService = require('../services/exporter');
 const reconciliationService = require('../services/reconciliation');
 const { app } = require('../server');
+const requestApp = require('./utils/request');
 
 describe('Exports and reconciliation endpoints', () => {
     const jobId = 'job-exports-1';
@@ -90,18 +96,22 @@ describe('Exports and reconciliation endpoints', () => {
 
     describe('POST /api/jobs/:jobId/exports', () => {
         it('should reject invalid export format', async () => {
-            const response = await request(app)
-                .post(`/api/jobs/${jobId}/exports`)
-                .send({ format: 'pdf' });
+            const response = await requestApp(app, {
+                method: 'POST',
+                path: `/api/jobs/${jobId}/exports`,
+                json: { format: 'pdf' },
+            });
 
             expect(response.status).toBe(400);
             expect(response.body.message).toBe('Formato de exportação inválido.');
         });
 
         it('should return CSV payload using backend exporter', async () => {
-            const response = await request(app)
-                .post(`/api/jobs/${jobId}/exports`)
-                .send({ format: 'csv' });
+            const response = await requestApp(app, {
+                method: 'POST',
+                path: `/api/jobs/${jobId}/exports`,
+                json: { format: 'csv' },
+            });
 
             expect(response.status).toBe(200);
             expect(exporterService.extractDocumentsFromStorage).toHaveBeenCalledTimes(1);
@@ -114,15 +124,24 @@ describe('Exports and reconciliation endpoints', () => {
 
     describe('POST /api/jobs/:jobId/reconciliation', () => {
         it('should require at least one statement file', async () => {
-            const response = await request(app).post(`/api/jobs/${jobId}/reconciliation`);
+            const response = await requestApp(app, {
+                method: 'POST',
+                path: `/api/jobs/${jobId}/reconciliation`,
+            });
             expect(response.status).toBe(400);
             expect(response.body.message).toBe('Envie pelo menos um arquivo OFX ou CSV.');
         });
 
         it('should reconcile statements successfully', async () => {
-            const response = await request(app)
-                .post(`/api/jobs/${jobId}/reconciliation`)
-                .attach('statements', Buffer.from('dummy'), 'bank.ofx');
+            const response = await requestApp(app, {
+                method: 'POST',
+                path: `/api/jobs/${jobId}/reconciliation`,
+                multipart: {
+                    files: [
+                        { fieldName: 'statements', filename: 'bank.ofx', buffer: Buffer.from('dummy'), contentType: 'application/octet-stream' },
+                    ],
+                },
+            });
 
             expect(response.status).toBe(200);
             expect(reconciliationService.parseStatements).toHaveBeenCalledTimes(1);

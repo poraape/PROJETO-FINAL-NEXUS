@@ -3,6 +3,7 @@ const express = require('express');
 const http = require('http');
 const { WebSocketServer, WebSocket } = require('ws');
 const cors = require('cors');
+const crypto = require('crypto');
 require('dotenv').config();
 const multer = require('multer'); // multer é necessário para o contexto das rotas
 const redisClient = require('./services/redisClient');
@@ -14,6 +15,8 @@ const metrics = require('./services/metrics');
 const storageService = require('./services/storage');
 const pipelineConfig = require('./services/pipelineConfig');
 const { availableTools } = require('./services/geminiClient');
+const langchainBridge = require('./services/langchainBridge');
+const langchainClient = require('./services/langchainClient');
 
 storageService.init();
 
@@ -95,6 +98,53 @@ const jobConnections = new Map(); // Mapeia jobId -> WebSocket
 const jobTimers = new Map();
 
 const PERSISTABLE_RESULT_KEYS = ['executiveSummary', 'simulationResult', 'validations'];
+const JOB_CONTEXT_KEY_PREFIX = 'job';
+
+const STARTUP_DEPENDENCY_TIMEOUT_MS = parseInt(process.env.STARTUP_DEPENDENCY_TIMEOUT_MS || '15000', 10);
+const TOOL_TIMEOUT_MS = parseInt(process.env.AGENT_TOOL_TIMEOUT_MS || '20000', 10);
+const TOOL_MAX_RETRIES = parseInt(process.env.AGENT_TOOL_MAX_RETRIES || '2', 10);
+
+function buildJobContextKey(jobId) {
+    return `${JOB_CONTEXT_KEY_PREFIX}:${jobId}:ctx`;
+}
+
+function computeJobContextHash(job = {}) {
+    const payload = {
+        status: job.status,
+        pipeline: job.pipeline,
+        result: job.result,
+        error: job.error,
+        contextDigest: job.contextDigest,
+        completedAt: job.completedAt,
+    };
+    return crypto.createHash('sha1').update(JSON.stringify(payload)).digest('hex');
+}
+
+function summarisePayload(payload = {}) {
+    const summary = {
+        keys: Object.keys(payload),
+        artifacts: Array.isArray(payload.artifacts) ? payload.artifacts.length : 0,
+        filesMeta: Array.isArray(payload.filesMeta) ? payload.filesMeta.length : 0,
+        documents: Array.isArray(payload.documents) ? payload.documents.length : 0,
+    };
+    summary.hash = crypto.createHash('sha1').update(JSON.stringify(summary)).digest('hex');
+    return summary;
+}
+
+function applyJobMetadata(job, meta = {}) {
+    if (!job) return job;
+    const metadata = {
+        ...(job.metadata || {}),
+        pipelineVersion: job.metadata?.pipelineVersion || pipelineConfig.getOrderedTasks().length,
+        source: meta.source || job.metadata?.source || 'server',
+        step: meta.step ?? job.metadata?.step ?? null,
+        note: meta.note || job.metadata?.note,
+    };
+    metadata.lastUpdatedAt = new Date().toISOString();
+    metadata.contextHash = computeJobContextHash(job);
+    job.metadata = metadata;
+    return job;
+}
 
 function pickPersistableResult(resultPayload) {
     if (!resultPayload || typeof resultPayload !== 'object') return null;
@@ -105,6 +155,129 @@ function pickPersistableResult(resultPayload) {
         }
     });
     return Object.keys(picked).length > 0 ? picked : null;
+}
+
+async function getJobContext(jobId) {
+    if (!jobId) return null;
+    const key = buildJobContextKey(jobId);
+    const existing = await redisClient.get(key);
+    if (!existing) return null;
+    try {
+        return JSON.parse(existing);
+    } catch (error) {
+        logger.error('[Server] Falha ao converter contexto do job em JSON.', { jobId, error });
+        return null;
+    }
+}
+
+async function saveJobContext(jobId, context) {
+    if (!jobId || !context) return;
+    const key = buildJobContextKey(jobId);
+    await redisClient.set(key, JSON.stringify(context));
+}
+
+async function persistTaskPayload(jobId, taskName, payload = {}) {
+    if (!jobId || !taskName) return;
+    const context = (await getJobContext(jobId)) || { perTask: {} };
+    context.perTask = context.perTask || {};
+    context.perTask[taskName] = payload;
+    context.lastTask = taskName;
+    context.lastPayload = payload;
+    context.updatedAt = new Date().toISOString();
+    await saveJobContext(jobId, context);
+
+    const job = await getJob(jobId);
+    if (!job) return;
+    job.contextDigest = {
+        lastTask: taskName,
+        updatedAt: context.updatedAt,
+        summary: summarisePayload(payload),
+    };
+    await saveJob(jobId, job, { source: 'orchestrator', step: taskName, note: 'context-updated' });
+}
+
+function wait(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function runWithTimeout(operation, timeoutMs, label) {
+    let timeout;
+    try {
+        return await Promise.race([
+            Promise.resolve().then(operation),
+            new Promise((_, reject) => {
+                timeout = setTimeout(() => reject(new Error(`Timeout aguardando ${label}`)), timeoutMs);
+            }),
+        ]);
+    } finally {
+        if (timeout) clearTimeout(timeout);
+    }
+}
+
+async function executeToolWithRetries({ jobId, toolName, toolFn, args, attempt = 0 }) {
+    const safeToolName = toolName || 'unknown_tool';
+    metrics.incrementCounter(`tool_${safeToolName}_invocations_total`);
+    const startedAt = Date.now();
+    try {
+        const result = await Promise.race([
+            Promise.resolve().then(() => toolFn(args)),
+            new Promise((_, reject) => setTimeout(() => reject(new Error(`Timeout ao executar a ferramenta após ${TOOL_TIMEOUT_MS}ms.`)), TOOL_TIMEOUT_MS)),
+        ]);
+        metrics.incrementCounter(`tool_${safeToolName}_completed_total`);
+        metrics.observeSummary(`tool_${safeToolName}_duration_ms`, Date.now() - startedAt);
+        return result;
+    } catch (error) {
+        metrics.observeSummary(`tool_${safeToolName}_duration_ms`, Date.now() - startedAt);
+        const shouldRetry = attempt < TOOL_MAX_RETRIES;
+        if (shouldRetry) {
+            logger.warn('[Server] Reexecutando ferramenta após falha.', { jobId, toolName: safeToolName, attempt: attempt + 1, error: error.message });
+            await wait(250 * (attempt + 1));
+            return executeToolWithRetries({ jobId, toolName: safeToolName, toolFn, args, attempt: attempt + 1 });
+        }
+        metrics.incrementCounter(`tool_${safeToolName}_failed_total`);
+        throw error;
+    }
+}
+
+async function waitForDependencies() {
+    const checks = [
+        { name: 'redis', fn: async () => redisClient.ping() },
+        { name: 'weaviate', fn: async () => weaviate.client.misc.liveChecker().do() },
+        {
+            name: 'langchainBridge',
+            fn: async () => {
+                if (!langchainBridge.isReady()) {
+                    throw new Error('LangChain bridge não está pronto.');
+                }
+                return langchainBridge.getDiagnostics();
+            },
+        },
+        {
+            name: 'geminiTools',
+            fn: async () => {
+                if (!availableTools || Object.keys(availableTools).length === 0) {
+                    throw new Error('Nenhuma ferramenta disponível para a IA.');
+                }
+            },
+        },
+        {
+            name: 'langchainClient',
+            fn: async () => {
+                const stats = await langchainClient.diagnostics();
+                if (!stats) {
+                    throw new Error('LangChain client não inicializado.');
+                }
+                return stats;
+            },
+        },
+    ];
+
+    const start = Date.now();
+    for (const check of checks) {
+        await runWithTimeout(check.fn, STARTUP_DEPENDENCY_TIMEOUT_MS, check.name);
+        logger.info(`[Server] Dependência ${check.name} validada.`);
+    }
+    logger.info(`[Server] Todas as dependências prontas em ${Date.now() - start}ms.`);
 }
 
 async function getJob(jobId) {
@@ -119,24 +292,26 @@ async function getJob(jobId) {
     }
 }
 
-async function saveJob(jobId, job) {
-    if (!jobId || !job) return;
+async function saveJob(jobId, job, meta = {}) {
+    if (!jobId || !job) return null;
+    applyJobMetadata(job, meta);
     await redisClient.set(`job:${jobId}`, JSON.stringify(job));
     const ws = jobConnections.get(jobId);
     if (ws && ws.readyState === ws.OPEN) {
         ws.send(JSON.stringify(job));
     }
+    return job;
 }
 
-async function mergeJobResult(jobId, resultPatch = {}) {
+async function mergeJobResult(jobId, resultPatch = {}, meta = {}) {
     if (!resultPatch || Object.keys(resultPatch).length === 0) return;
     const job = await getJob(jobId);
     if (!job) return;
     job.result = { ...(job.result || {}), ...resultPatch };
-    await saveJob(jobId, job);
+    await saveJob(jobId, job, meta);
 }
 
-async function finalizeJob(jobId, { status = 'completed', error, resultPatch } = {}) {
+async function finalizeJob(jobId, { status = 'completed', error, resultPatch, meta } = {}) {
     const job = await getJob(jobId);
     if (!job) return;
     if (resultPatch) {
@@ -145,15 +320,17 @@ async function finalizeJob(jobId, { status = 'completed', error, resultPatch } =
     job.status = status;
     job.error = status === 'failed' ? (error || 'Falha não especificada no pipeline.') : null;
     job.completedAt = new Date().toISOString();
-    await saveJob(jobId, job);
+    await saveJob(jobId, job, { source: 'orchestrator', step: meta?.step || 'finalize', note: meta?.note });
+    await redisClient.del(buildJobContextKey(jobId)).catch(() => {});
 }
 
 async function startTask(jobId, taskName, payload = {}) {
     if (!taskName) {
-        await finalizeJob(jobId);
+        await finalizeJob(jobId, { meta: { step: 'completion', note: 'no-task' } });
         return;
     }
     try {
+        await persistTaskPayload(jobId, taskName, payload);
         await eventBus.emit('task:start', { jobId, taskName, payload });
         const stepIndex = pipelineConfig.getStepIndex(taskName);
         if (stepIndex !== null) {
@@ -243,14 +420,14 @@ eventBus.on('task:completed', async ({ jobId, taskName, resultPayload, payload }
     try {
         const persistable = pickPersistableResult(resultPayload);
         if (persistable) {
-            await mergeJobResult(jobId, persistable);
+            await mergeJobResult(jobId, persistable, { source: 'agent', step: taskName });
         }
         const nextTask = pipelineConfig.getNextTask(taskName);
         if (nextTask) {
             const nextPayload = { ...(payload || {}), ...(resultPayload || {}) };
             await startTask(jobId, nextTask, nextPayload);
         } else {
-            await finalizeJob(jobId);
+            await finalizeJob(jobId, { meta: { step: taskName, note: 'pipeline-finished' } });
         }
     } catch (error) {
         logger.error('[Server] Falha ao encadear próxima tarefa.', { jobId, taskName, error });
@@ -263,7 +440,7 @@ eventBus.on('task:failed', async ({ jobId, taskName, error }) => {
     if (stepIndex !== null) {
         await updateJobStatus(jobId, stepIndex, 'failed', error);
     }
-    await finalizeJob(jobId, { status: 'failed', error });
+    await finalizeJob(jobId, { status: 'failed', error, meta: { step: taskName, note: 'pipeline-error' } });
 });
 
 eventBus.on('tool:run', async ({ jobId, toolCall, payload, prompt }) => {
@@ -274,7 +451,8 @@ eventBus.on('tool:run', async ({ jobId, toolCall, payload, prompt }) => {
             throw new Error(`Ferramenta '${toolName || 'desconhecida'}' não está disponível.`);
         }
         const args = toolCall.args || {};
-        const toolResult = await toolFn(args);
+        const toolResult = await executeToolWithRetries({ jobId, toolName, toolFn, args });
+        langchainBridge.appendMemory(jobId, 'tool', `Ferramenta ${toolName}: ${JSON.stringify(toolResult).slice(0, 600)}`, { type: 'tool_result' });
         eventBus.emit('orchestrator:tool_completed', {
             jobId,
             toolResult,
@@ -299,6 +477,10 @@ eventBus.on('tool:run', async ({ jobId, toolCall, payload, prompt }) => {
 const sharedContext = { // Objeto de dependências injetado nas rotas e agentes
     updateJobStatus,
     finalizeJob,
+    getJob,
+    saveJob,
+    getJobContext,
+    persistTaskPayload,
     eventBus,
     weaviate,
     redisClient,
@@ -308,6 +490,8 @@ const sharedContext = { // Objeto de dependências injetado nas rotas e agentes
     logger: logger.child({ module: 'sharedContext' }),
     metrics,
     storageService,
+    langchainBridge,
+    langchainClient,
 };
 
 // --- REGISTRO DE ROTAS E AGENTES ---
@@ -347,7 +531,9 @@ async function updateJobStatus(jobId, stepIndex, status, info) {
         job.pipeline[stepIndex].info = info;
     }
 
-    await saveJob(jobId, job);
+    const orderedTasks = pipelineConfig.getOrderedTasks();
+    const stepTaskName = orderedTasks[stepIndex] || `step-${stepIndex}`;
+    await saveJob(jobId, job, { source: 'pipeline', step: stepTaskName, note: info });
 }
 
 // --- Lógica de Desligamento Gradual (Graceful Shutdown) ---
@@ -390,9 +576,16 @@ process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT')); // Captura Ctrl+C
 
 if (!isTestEnv && require.main === module) {
-    server.listen(port, () => {
-        logger.info(`[Server] Servidor iniciado na porta ${port}.`);
-    });
+    waitForDependencies()
+        .then(() => {
+            server.listen(port, () => {
+                logger.info(`[Server] Servidor iniciado na porta ${port}.`);
+            });
+        })
+        .catch(error => {
+            logger.fatal('[Server] Startup interrompido por dependências indisponíveis.', { error });
+            process.exit(1);
+        });
 }
 
 module.exports = { app, server, processFilesInBackground };

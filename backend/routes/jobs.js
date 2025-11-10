@@ -139,7 +139,7 @@ function buildAttachmentContextFromArtifacts(artifacts = []) {
     return context;
 }
 
-async function indexArtifactsInWeaviate(jobId, artifacts = [], weaviate, embeddingModel) {
+async function indexArtifactsInWeaviate(jobId, artifacts = [], weaviate, embeddingModel, langchainBridge) {
     if (!artifacts.length || !weaviate?.client?.batch?.objectsBatcher || !embeddingModel?.batchEmbedContents) {
         return;
     }
@@ -163,11 +163,31 @@ async function indexArtifactsInWeaviate(jobId, artifacts = [], weaviate, embeddi
 
     if (chunks.length === 0) return;
 
-    const embeddings = await embeddingModel.batchEmbedContents({
-        requests: chunks.map(chunk => ({ model: "models/text-embedding-004", content: chunk.content })),
-    }).catch(() => ({ embeddings: [] }));
+    const vectors = new Array(chunks.length).fill(null);
+    const requests = [];
 
-    const vectors = embeddings?.embeddings || [];
+    chunks.forEach((chunk, index) => {
+        const cacheKey = `${chunk.sourceHash}:${chunk.chunkIndex}`;
+        const cached = langchainBridge?.getCachedEmbedding?.(cacheKey);
+        if (cached) {
+            vectors[index] = { values: cached };
+        } else {
+            requests.push({ chunk, index, cacheKey });
+        }
+    });
+
+    if (requests.length > 0) {
+        const embeddings = await embeddingModel.batchEmbedContents({
+            requests: requests.map(req => ({ model: "models/text-embedding-004", content: req.chunk.content })),
+        }).catch(() => ({ embeddings: [] }));
+
+        const generated = embeddings?.embeddings || [];
+        requests.forEach((req, idx) => {
+            const vector = generated[idx]?.values || [];
+            vectors[req.index] = { values: vector };
+            langchainBridge?.rememberEmbedding?.(req.cacheKey, vector);
+        });
+    }
     const objects = chunks
         .map((chunk, index) => ({
             className: weaviate.className,
@@ -187,11 +207,12 @@ module.exports = (context) => {
         redisClient,
         processFilesInBackground,
         embeddingModel,
-        model,
-        availableTools,
         weaviate,
         storageService,
         logger,
+        saveJob,
+        langchainBridge,
+        langchainClient,
     } = context;
 
     // --- Endpoints de Processamento Assíncrono ---
@@ -221,8 +242,9 @@ module.exports = (context) => {
         const newJob = {
             status: 'processing',
             pipeline: pipelineState,
-            result: null,
+            result: {},
             error: null,
+            jobId,
             uploadedFiles: storedFiles.map(file => ({
                 name: file.originalName,
                 hash: file.hash,
@@ -231,8 +253,11 @@ module.exports = (context) => {
             })),
         };
 
-        // Armazena o novo job no Redis
-        await redisClient.set(`job:${jobId}`, JSON.stringify(newJob));
+        langchainBridge?.resetJob?.(jobId);
+        langchainClient?.reset?.(jobId);
+
+        // Armazena o novo job no Redis com metadados
+        await saveJob(jobId, newJob, { source: 'jobs-route', step: 'init', note: 'job-created' });
 
         // Retorna o ID do job imediatamente
         res.status(202).json({ jobId });
@@ -279,6 +304,7 @@ module.exports = (context) => {
                 return res.status(404).json({ message: 'Job não encontrado.' });
             }
             const job = JSON.parse(jobString);
+            langchainBridge?.appendMemory?.(jobId, 'user', question, { source: 'chat' });
 
             let attachmentArtifacts = [];
             if (attachments.length > 0) {
@@ -309,7 +335,7 @@ module.exports = (context) => {
 
                 try {
                     attachmentArtifacts = await extractArtifactsFromMetas(uniqueAttachments, storageService);
-                    await indexArtifactsInWeaviate(jobId, attachmentArtifacts, weaviate, embeddingModel).catch((error) => {
+                    await indexArtifactsInWeaviate(jobId, attachmentArtifacts, weaviate, embeddingModel, langchainBridge).catch((error) => {
                         logger?.warn?.(`[Chat-RAG] Job ${jobId}: falha ao indexar anexos.`, { error });
                     });
                 } catch (error) {
@@ -318,7 +344,7 @@ module.exports = (context) => {
                 }
             }
 
-            const contextBlocks = [];
+            const contextSections = [];
             try {
                 const embeddingResult = await embeddingModel.embedContent(question);
                 const vector = embeddingResult?.embedding?.values || [];
@@ -338,7 +364,7 @@ module.exports = (context) => {
                         const ragContext = contextChunks
                             .map(chunk => `Trecho do arquivo ${chunk.fileName || 'desconhecido'}:\n${chunk.content}`)
                             .join('\n\n');
-                        contextBlocks.push(`### Contexto indexado\n${ragContext}`);
+                        contextSections.push({ title: 'Contexto indexado', body: ragContext });
                     }
                 }
             } catch (error) {
@@ -348,55 +374,56 @@ module.exports = (context) => {
 
             const structuredContext = buildJobStructuredContext(job);
             if (structuredContext) {
-                contextBlocks.push(`### Contexto fiscal estruturado\n${structuredContext}`);
+                contextSections.push({ title: 'Contexto fiscal estruturado', body: structuredContext });
             }
 
             const attachmentContext = buildAttachmentContextFromArtifacts(attachmentArtifacts);
             if (attachmentContext) {
-                contextBlocks.push(`### Conteúdo dos anexos recentes\n${attachmentContext}`);
+                contextSections.push({ title: 'Conteúdo dos anexos recentes', body: attachmentContext });
             }
 
-            const knowledgeSource = contextBlocks.length > 0
-                ? contextBlocks.join('\n\n---\n\n')
-                : 'Nenhum contexto adicional foi recuperado. Responda apenas com base em seu conhecimento geral, informando claramente essa limitação.';
+            const transcript = langchainBridge?.buildTranscript?.(jobId, 6);
+            if (transcript) {
+                contextSections.push({ title: 'Memória conversacional', body: transcript });
+            }
 
-            const prompt = `
-Você é um especialista fiscal que atua como copiloto dos agentes internos. Use somente as informações recuperadas, mantendo confidencialidade e clareza.
+            const metadataSection = job?.metadata?.contextHash
+                ? `Hash do contexto: ${job.metadata.contextHash}\nAtualizado em: ${job.metadata.lastUpdatedAt || 'n/d'}`
+                : '';
+            if (metadataSection) {
+                contextSections.push({ title: 'Metadados do job', body: metadataSection });
+            }
 
-FONTE DE CONHECIMENTO:
-${knowledgeSource}
+            const manualRagContext = contextSections.length > 0
+                ? contextSections.map(section => `### ${section.title}\n${section.body}`).join('\n\n---\n\n')
+                : '';
 
-PERGUNTA DO USUÁRIO:
-${question}
-
-Responda em português, com precisão factual. Se precisar usar ferramentas (ex.: tax_simulation), solicite-as. Se os dados forem insuficientes, explique o que falta e sugira próximos passos.`.trim();
-
-            const chat = model.startChat({
-                tools: availableTools,
+            const chatResult = await langchainClient.runChat({
+                jobId,
+                question,
+                structuredContext,
+                attachmentContext,
+                manualRagContext,
             });
 
-            const result = await chat.sendMessage(prompt);
-            const call = result.response.functionCalls()?.[0];
-
-            let answer;
-            if (call) {
-                logger?.info?.(`[Chat-RAG] Job ${jobId}: IA solicitou a ferramenta '${call.name}'.`);
-                const toolFn = availableTools[call.name];
-                if (!toolFn) {
-                    throw new Error(`Ferramenta desconhecida solicitada pela IA: ${call.name}`);
-                }
-                const toolResult = await toolFn(call.args);
-                const finalResult = await chat.sendMessage([{ functionResponse: { name: call.name, response: { content: JSON.stringify(toolResult) } } }]);
-                answer = finalResult.response.text();
-            } else {
-                answer = result.response.text();
-            }
+            const answer = chatResult.answer;
 
             if (useCache && cacheKey && answer) {
                 await redisClient.set(cacheKey, answer, { EX: CHAT_CACHE_TTL_SECONDS }).catch(() => {});
             }
 
-            res.status(200).json({ answer });
+            if (answer) {
+                langchainBridge?.appendMemory?.(jobId, 'assistant', answer, { source: 'chat' });
+            }
+
+            res.status(200).json({
+                answer,
+                contextSections,
+                metadata: {
+                    contextHash: job?.metadata?.contextHash || null,
+                    lastUpdatedAt: job?.metadata?.lastUpdatedAt || null,
+                },
+            });
         } catch (error) {
             logger?.error?.(`[Chat-RAG] Erro no job ${jobId}:`, { error });
             // Fornece uma mensagem de erro mais genérica para o cliente por segurança,

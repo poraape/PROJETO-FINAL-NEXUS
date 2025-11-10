@@ -3,7 +3,7 @@ const express = require('express');
 const router = express.Router();
 
 module.exports = (context) => {
-    const { redisClient, weaviate, geminiApiKey } = context;
+    const { redisClient, weaviate, geminiApiKey, langchainBridge } = context;
 
     // --- Health Check Endpoint ---
     router.get('/', async (req, res) => {
@@ -17,7 +17,9 @@ module.exports = (context) => {
                 redis: 'pending',
                 weaviate: 'pending',
                 gemini_api: 'pending',
-            }
+                langchain: 'pending',
+            },
+            diagnostics: {},
         };
 
         let isHealthy = true;
@@ -43,6 +45,14 @@ module.exports = (context) => {
         // Check Gemini API Key
         healthStatus.services.gemini_api = currentGeminiKey ? 'ok' : 'error: API key not configured';
         if (!currentGeminiKey) isHealthy = false;
+
+        // Check LangChain bridge readiness
+        const langchainReady = langchainBridge?.isReady?.() ?? false;
+        healthStatus.services.langchain = langchainReady ? 'ok' : 'error: LangChain bridge not ready';
+        healthStatus.diagnostics.langchain = langchainBridge?.getDiagnostics?.() || null;
+        if (!langchainReady) {
+            isHealthy = false;
+        }
 
         healthStatus.status = isHealthy ? 'ok' : 'error';
 
