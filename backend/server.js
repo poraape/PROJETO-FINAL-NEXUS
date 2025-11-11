@@ -15,6 +15,7 @@ const storageService = require('./services/storage');
 const pipelineConfig = require('./services/pipelineConfig');
 const { availableTools, model, embeddingModel } = require('./services/geminiClient');
 const { registerLangChainOrchestrator } = require('./langchain/orchestrator');
+const langchainBridge = require('./services/langchainBridge');
 
 storageService.init();
 
@@ -315,6 +316,7 @@ const sharedContext = { // Objeto de dependências injetado nas rotas e agentes
     logger: logger.child({ module: 'sharedContext' }),
     metrics,
     storageService,
+    langchainBridge,
 };
 
 // --- REGISTRO DE ROTAS E AGENTES ---

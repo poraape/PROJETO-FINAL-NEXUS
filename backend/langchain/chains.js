@@ -5,7 +5,7 @@ const { GeminiLLM } = require('./llms/geminiLLM');
 
 const DEFAULT_GENERATION_CONFIG = {};
 
-const SINGLE_INPUT_KEY = ['input'];
+const DEFAULT_INPUT_KEYS = ['jobId', 'taskContext', 'ragContext'];
 
 function createGeminiChain(context, promptTemplate, memoryKey, outputKey, additionalConfig = {}) {
     const llm = new GeminiLLM({
@@ -19,22 +19,22 @@ function createGeminiChain(context, promptTemplate, memoryKey, outputKey, additi
         prompt: promptTemplate,
         memory: new BufferMemory({ memoryKey, returnMessages: false }),
         outputKey,
-        inputKeys: SINGLE_INPUT_KEY,
+        inputKeys: DEFAULT_INPUT_KEYS,
     });
 }
 
 function createReviewChain(context) {
     const prompt = new PromptTemplate({
-        inputVariables: ['input'],
+        inputVariables: DEFAULT_INPUT_KEYS,
         template: `
 Você é um auditor automatizado responsável por revisar as saídas geradas por agentes inteligentes.
-Recebeu o contexto a seguir (incluindo tópicos RAG quando disponíveis) para o job {input.jobId}:
+Recebeu o contexto a seguir (incluindo tópicos RAG quando disponíveis) para o job {jobId}:
 
 Contexto estruturado:
-{input.taskContext}
+{taskContext}
 
 Contexto adicional (RAG):
-{input.ragContext}
+{ragContext}
 
 Retorne um JSON com a estrutura:
 {{
@@ -52,17 +52,17 @@ Retorne um JSON com a estrutura:
 
 function createAuditChain(context) {
     const prompt = new PromptTemplate({
-        inputVariables: ['input'],
+        inputVariables: DEFAULT_INPUT_KEYS,
         template: `
 Você é um fiscal automatizado consolidando indicadores de risco.
 Use o contexto abaixo para avaliar a consistência dos dados e priorizar alertas relevantes.
 
-Job: {input.jobId}
+Job: {jobId}
 Contexto:
-{input.taskContext}
+{taskContext}
 
 Contexto adicional (RAG):
-{input.ragContext}
+{ragContext}
 
 Retorne um JSON com:
 {{
@@ -80,17 +80,17 @@ Prefira instruções acionáveis e cite o trecho que motivou a conclusão.
 
 function createClassificationChain(context) {
     const prompt = new PromptTemplate({
-        inputVariables: ['input'],
+        inputVariables: DEFAULT_INPUT_KEYS,
         template: `
 Você é um especialista em classificação fiscal.
 Baseie-se no contexto abaixo para revisar envelopes de risco e gerar recomendações.
 
-Job: {input.jobId}
+Job: {jobId}
 Contexto:
-{input.taskContext}
+{taskContext}
 
 Contexto adicional (RAG):
-{input.ragContext}
+{ragContext}
 
 Retorne um JSON com:
 {{

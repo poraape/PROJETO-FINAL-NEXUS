@@ -32,7 +32,7 @@ async function executeLangChainChain(entry, userContext, jobId, metrics) {
     metrics?.incrementCounter('langchain_chain_runs_total');
     try {
         const chainInput = {
-            input: userContext,
+            ...userContext,
         };
         const result = await entry.chain.call(chainInput);
         const durationMs = Number(process.hrtime.bigint() - start) / 1e6;
