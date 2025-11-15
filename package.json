@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "deps:audit": "node ./scripts/dependency-audit.mjs",
+    "load:test": "node ./scripts/load-test.mjs"
   },
   "dependencies": {
     "@google/genai": "^1.28.0",

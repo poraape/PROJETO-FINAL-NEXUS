@@ -13,6 +13,7 @@ const logger = require('./services/logger').child({ module: 'server' });
 const metrics = require('./services/metrics');
 const storageService = require('./services/storage');
 const pipelineConfig = require('./services/pipelineConfig');
+const telemetryStore = require('./services/telemetryStore');
 const { availableTools, model, embeddingModel } = require('./services/geminiClient');
 const { registerLangChainOrchestrator } = require('./langchain/orchestrator');
 const langchainBridge = require('./services/langchainBridge');
@@ -161,6 +162,10 @@ async function finalizeJob(jobId, { status = 'completed', error, resultPatch } =
     job.error = status === 'failed' ? (error || 'Falha não especificada no pipeline.') : null;
     job.completedAt = new Date().toISOString();
     await saveJob(jobId, job);
+    telemetryStore.recordJobStatus(jobId, status, {
+        error,
+        completedAt: job.completedAt,
+    });
 }
 
 async function startTask(jobId, taskName, payload = {}) {
@@ -169,6 +174,11 @@ async function startTask(jobId, taskName, payload = {}) {
         return;
     }
     try {
+        telemetryStore.recordTaskStart(jobId, taskName, {
+            fileCount: Array.isArray(payload?.filesMeta) ? payload.filesMeta.length : undefined,
+            currentStep: taskName,
+        });
+        telemetryStore.recordJobStatus(jobId, 'processing', { currentStep: taskName });
         await eventBus.emit('task:start', { jobId, taskName, payload });
         const stepIndex = pipelineConfig.getStepIndex(taskName);
         if (stepIndex !== null) {
@@ -274,6 +284,9 @@ const wsHealthCheckInterval = setInterval(() => {
 eventBus.on('task:completed', async ({ jobId, taskName, resultPayload, payload }) => {
     try {
         const persistable = pickPersistableResult(resultPayload);
+        telemetryStore.recordTaskEnd(jobId, taskName, 'completed', {
+            resultKeys: persistable ? Object.keys(persistable) : undefined,
+        });
         if (persistable) {
             await mergeJobResult(jobId, persistable);
         }
@@ -294,6 +307,7 @@ eventBus.on('task:failed', async ({ jobId, taskName, error }) => {
     if (stepIndex !== null) {
         await updateJobStatus(jobId, stepIndex, 'failed', error);
     }
+    telemetryStore.recordTaskEnd(jobId, taskName, 'failed', { error });
     await finalizeJob(jobId, { status: 'failed', error });
 });
 

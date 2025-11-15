@@ -4,7 +4,8 @@
   "description": "Backend for Nexus QuantumI2A2",
   "main": "server.js",
   "scripts": {
-    "test": "jest",
+    "test": "jest --runInBand",
+    "test:coverage": "jest --runInBand --coverage --coverageReporters=text-summary --coverageReporters=lcov",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "token:generate": "node scripts/generateAccessToken.js"
@@ -41,7 +42,8 @@
     "serve": "^14.2.3",
     "supertest": "^7.0.0"
   },
-  "jest": {
-    "testEnvironment": "node"
+  "engines": {
+    "node": ">=18.20.0",
+    "npm": ">=10.0.0"
   }
 }

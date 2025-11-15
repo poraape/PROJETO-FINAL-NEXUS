@@ -197,16 +197,21 @@ Recarregue o backend (`npm run dev` ou `node backend/server.js`) sempre que atua
 
 ## Monitoramento, logs e métricas
 
-- Logs estruturados com contexto (módulo, job, task) em `backend/services/logger.js`; backend redireciona `stdout` para `backend.log`.  
-- Métricas in-memory com formato Prometheus via `backend/services/metrics.js`; expostas em `/metrics` para scraping.  
+- Logs estruturados com contexto (módulo, job, task) em `backend/services/logger.js`; backend redireciona `stdout` para `backend.log`.
+- Métricas in-memory com formato Prometheus via `backend/services/metrics.js`; expostas em `/metrics` para scraping.
 - LangChain registra `langchain_chain_runs_total`, `langchain_chain_duration_ms`, `langchain_chain_success_total`, `langchain_chain_failure_total`.
+- Telemetria contínua em `backend/services/telemetryStore.js`, que armazena cronogramas de tarefas, duração média por etapa e status do job.
+- Rotas `/api/observability/overview` e `/api/observability/jobs/:jobId` disponibilizam snapshots de saúde e timelines rastreáveis (mesmo quando a UI não consome essas informações).
 
-## Testes e validação
+## Testes, cobertura e auditoria de dependências
 
-- **Backend**: `cd backend && npm test -- <suite>` (ex.: `langchainOrchestrator`, `jobsStatus`, `health`). Usa Jest com mocks de Redis, Weaviate e Gemini.  
-- **Pipeline end-to-end**: `cd backend && npm test -- pipelineE2E` simula o job completo e valida a persistência das propriedades `langChain*`.  
-- **Frontend**: `npm run build` valida bundling.  
-- Execute `npm run lint` no backend para validação de estilo (ESLint).  
+- **Backend (unitário/integrado)**: `cd backend && npm test -- <suite>` (ex.: `langchainOrchestrator`, `jobsStatus`, `health`). O comando padrão roda em modo `--runInBand` para evitar condições de corrida com mocks.
+- **Cobertura oficial**: `cd backend && npm run test:coverage`. Gera `coverage/lcov-report` e respeita os thresholds globais (20% linhas/estatements, 15% funções, 10% branches). O workflow CI publica o artefato automaticamente.
+- **Pipeline end-to-end**: `cd backend && npm test -- pipelineE2E` simula o job completo e valida a persistência das propriedades `langChain*`.
+- **Frontend**: `npm run build` garante bundling consistente.
+- **Lint**: execute `cd backend && npm run lint` para garantir o padrão ESLint.
+- **Auditoria de dependências**: `npm run deps:audit` gera `reports/dependency-audit-report.json` consolidando `npm outdated` + `npm audit` para raiz e backend. Use esse relatório antes de abrir PRs.
+- **Teste de carga determinístico**: `npm run load:test` (opcional) emite requisições paralelas para `/api/health`, `/metrics` e `/api/observability/overview`, grava `reports/load-test-report.json` e permite ajustar `LOADTEST_*` (BASE_URL, CONCURRENCY, DURATION_MS, ENDPOINTS).
 - Para testes end-to-end manuais: suba `start-dev.sh`, faça upload de arquivos fiscais, consulte `/api/jobs/:jobId/status` e abra o dashboard em `http://localhost:8000`.
 
 ## Contribuição e licenciamento

@@ -9,6 +9,7 @@ const { buildJobAnalytics } = require('../services/analyticsService');
 const exporterService = require('../services/exporter');
 const reconciliationService = require('../services/reconciliation');
 const pipelineConfig = require('../services/pipelineConfig');
+const telemetryStore = require('../services/telemetryStore');
 const { requireAuth, requireScopes, enforceJobOwnership } = require('../middleware/auth');
 const { withJobContext } = require('../middleware/jobContext');
 const { jobTtlSeconds, chatCacheTtlSeconds } = require('../config/cache');
@@ -261,6 +262,11 @@ module.exports = (context) => {
 
         // Armazena o novo job no Redis
         await redisClient.set(`job:${jobId}`, JSON.stringify(newJob), { EX: jobTtlSeconds });
+        const totalSizeBytes = storedFiles.reduce((sum, file) => sum + (file.size || 0), 0);
+        telemetryStore.recordJobStatus(jobId, 'queued', {
+            fileCount: storedFiles.length,
+            totalSizeBytes,
+        });
 
         // Retorna o ID do job imediatamente
         res.status(202).json({ jobId });

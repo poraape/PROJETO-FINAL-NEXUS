@@ -40,5 +40,21 @@ Este documento acompanha a execução sequenciada do plano aprovado. Cada etapa 
 - `.env.example` e README foram atualizados com as novas variáveis de retenção, criptografia e TLS, facilitando rollout em diferentes ambientes.
 - Próxima etapa: **Etapa 7 – Auditoria de dependências, CI e cobertura de testes**, conforme roadmap.
 
+## Etapa 7 – Auditoria de Dependências, CI e Cobertura (Concluída)
+- Adicionado `scripts/dependency-audit.mjs` e script `npm run deps:audit`, que rodam `npm outdated`/`npm audit` em ambos workspaces e escrevem `reports/dependency-audit-report.json` como evidência rastreável.
+- CI (`.github/workflows/ci.yml`) agora executa a auditoria, aplica cache compartilhado para `package-lock.json`/`backend/package-lock.json`, roda `npm run test:coverage` no backend e publica o artefato de cobertura.
+- Backend passou a exigir Node ≥18.20/NPM ≥10, ganhou `jest.config.js` com limites mínimos de cobertura e script dedicado `npm run test:coverage`.
+- O mock do `geminiClient` nos testes de chat passou a oferecer `startChat`/`sendMessage` por padrão, eliminando timeouts anteriores e garantindo leitura de cobertura consistente.
+- README documenta o novo fluxo de auditoria/cobertura para orientar PRs futuros.
+- Próxima etapa: **Etapa 8 – Observabilidade contínua e testes de carga** (planejada para próximo ciclo).
+
+## Etapa 8 – Observabilidade contínua e testes de carga (Concluída)
+- Criado `backend/services/telemetryStore.js` para registrar timelines, durações por etapa, status history e métricas agregadas dos jobs, com TTL alinhado ao cache e counters Prometheus.
+- Inserido endpoint `/api/observability/overview` e `/api/observability/jobs/:jobId` (rota nova em `backend/routes/observability.js`) consumindo o telemetry store e respeitando o middleware de escopos/propriedade.
+- Servidor e rotas de jobs agora emitem eventos de telemetria (`recordJobStatus`, `recordTaskStart/End`) garantindo rastreabilidade sem tocar a UI existente.
+- Adicionados testes (`backend/tests/telemetryStore.test.js` e `backend/tests/observabilityRoutes.test.js`) para cobrir o novo store e as rotas de observabilidade.
+- Criado script `scripts/load-test.mjs` exposto via `npm run load:test`, documentado no README e configurado para gerar `reports/load-test-report.json` com percentis e média por endpoint.
+- Próxima etapa: **Etapa 9 – Automação de observabilidade em produção e alertas SLO** (planejada para o próximo ciclo).
+
 ## Encerramento
-Com as seis etapas entregues, o pipeline agora executa ingestão robusta, analytics determinísticos, UI baseada em dados reais, chat guiado por RAG/token governance, perímetro autenticado e políticas de retenção/criptografia alinhadas ao plano. Próximas melhorias podem focar em observabilidade contínua, auditoria de dependências e testes automatizados adicionais.
+Com as oito etapas entregues, o pipeline agora executa ingestão robusta, analytics determinísticos, UI baseada em dados reais, chat guiado por RAG/token governance, perímetro autenticado, políticas de retenção/criptografia e telemetria contínua com testes de carga versionados. Próximas melhorias podem focar em automação de alertas SLO, hardening de deploy e cobertura avançada da camada de armazenamento.
