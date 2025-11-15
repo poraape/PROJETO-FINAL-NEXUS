@@ -9,12 +9,14 @@ const { buildJobAnalytics } = require('../services/analyticsService');
 const exporterService = require('../services/exporter');
 const reconciliationService = require('../services/reconciliation');
 const pipelineConfig = require('../services/pipelineConfig');
+const { requireAuth, requireScopes, enforceJobOwnership } = require('../middleware/auth');
+const { withJobContext } = require('../middleware/jobContext');
+const { jobTtlSeconds, chatCacheTtlSeconds } = require('../config/cache');
 const router = express.Router();
 
 const MAX_CHAT_ATTACHMENTS = parseInt(process.env.CHAT_MAX_ATTACHMENTS || '5', 10);
 const CHAT_ATTACHMENT_SNIPPET_LENGTH = parseInt(process.env.CHAT_ATTACHMENT_SNIPPET_LENGTH || '600', 10);
 const CHAT_ATTACHMENT_MAX_ARTIFACTS = parseInt(process.env.CHAT_ATTACHMENT_MAX_ARTIFACTS || '4', 10);
-const CHAT_CACHE_TTL_SECONDS = parseInt(process.env.CHAT_CACHE_TTL_SECONDS || '900', 10);
 const DEFAULT_ATTACHMENTS_QUESTION = 'Analise detalhadamente os anexos enviados e forneça insights fiscais e recomendações práticas.';
 
 // Middleware de validação com Joi
@@ -207,9 +209,13 @@ module.exports = (context) => {
         logger,
     } = context;
 
+    const loadJobContext = withJobContext(redisClient);
+
+    router.use(requireAuth);
+
     // --- Endpoints de Processamento Assíncrono ---
 
-    router.post('/', upload.array('files'), validateUpload, async (req, res) => {
+    router.post('/', requireScopes(['jobs:create']), upload.array('files'), validateUpload, async (req, res) => {
         const jobId = uuidv4();
         console.log(`[BFF] Novo job criado com ID: ${jobId}`);
 
@@ -232,12 +238,18 @@ module.exports = (context) => {
         }
 
         const ingestionTimestamp = new Date().toISOString();
+        const owner = {
+            sub: req.auth?.sub || 'anonymous',
+            orgId: req.auth?.orgId || req.auth?.tenantId || 'default',
+            scopes: Array.isArray(req.auth?.scopes) ? req.auth.scopes : [],
+        };
         const newJob = {
             status: 'processing',
             pipeline: pipelineState,
             result: null,
             error: null,
             createdAt: ingestionTimestamp,
+            owner,
             uploadedFiles: storedFiles.map(file => ({
                 name: file.originalName,
                 hash: file.hash,
@@ -248,7 +260,7 @@ module.exports = (context) => {
         };
 
         // Armazena o novo job no Redis
-        await redisClient.set(`job:${jobId}`, JSON.stringify(newJob));
+        await redisClient.set(`job:${jobId}`, JSON.stringify(newJob), { EX: jobTtlSeconds });
 
         // Retorna o ID do job imediatamente
         res.status(202).json({ jobId });
@@ -257,143 +269,140 @@ module.exports = (context) => {
         processFilesInBackground(jobId, storedFiles);
     });
 
-    router.get('/:jobId/status', async (req, res) => {
-        const { jobId } = req.params;
-        const jobString = await redisClient.get(`job:${jobId}`);
-
-        if (!jobString) {
-            return res.status(404).json({ message: 'Job não encontrado.' });
+    router.get(
+        '/:jobId/status',
+        requireScopes(['jobs:read']),
+        loadJobContext,
+        enforceJobOwnership,
+        (req, res) => {
+            res.status(200).json(req.jobRecord);
         }
+    );
 
-        res.status(200).json(JSON.parse(jobString));
-    });
-
-    router.get('/:jobId/analytics', async (req, res) => {
-        const { jobId } = req.params;
-        const jobString = await redisClient.get(`job:${jobId}`);
-
-        if (!jobString) {
-            return res.status(404).json({ message: 'Job não encontrado.' });
+    router.get(
+        '/:jobId/analytics',
+        requireScopes(['jobs:read']),
+        loadJobContext,
+        enforceJobOwnership,
+        (req, res) => {
+            const job = req.jobRecord;
+            if (!job.result) {
+                return res.status(202).json({ status: job.status || 'processing' });
+            }
+            const analytics = buildJobAnalytics(job);
+            return res.status(200).json(analytics);
         }
-
-        const job = JSON.parse(jobString);
-        if (!job.result) {
-            return res.status(202).json({ status: job.status || 'processing' });
-        }
-
-        const analytics = buildJobAnalytics(job);
-        return res.status(200).json(analytics);
-    });
+    );
 
     // --- Endpoint de Chat (RAG) ---
-    router.post('/:jobId/chat', upload.array('attachments', MAX_CHAT_ATTACHMENTS), async (req, res) => {
-        const { jobId } = req.params;
-        const attachments = Array.isArray(req.files) ? req.files : [];
-        const rawQuestion = typeof req.body?.question === 'string' ? req.body.question : '';
-        const question = rawQuestion.trim() || (attachments.length > 0 ? DEFAULT_ATTACHMENTS_QUESTION : '');
-        const useCache = attachments.length === 0 && !!question;
+    router.post(
+        '/:jobId/chat',
+        requireScopes(['jobs:read', 'chat:invoke']),
+        loadJobContext,
+        enforceJobOwnership,
+        upload.array('attachments', MAX_CHAT_ATTACHMENTS),
+        async (req, res) => {
+            const { jobId } = req.params;
+            const attachments = Array.isArray(req.files) ? req.files : [];
+            const rawQuestion = typeof req.body?.question === 'string' ? req.body.question : '';
+            const question = rawQuestion.trim() || (attachments.length > 0 ? DEFAULT_ATTACHMENTS_QUESTION : '');
+            const useCache = attachments.length === 0 && !!question;
 
-        if (!question) {
-            return res.status(400).json({ message: 'É necessário informar uma pergunta ou anexar arquivos.' });
-        }
-
-        let cacheKey;
-        if (useCache) {
-            cacheKey = buildChatCacheKey(jobId, question);
-            const cachedAnswer = await redisClient.get(cacheKey);
-            if (cachedAnswer) {
-                return res.status(200).json({ answer: cachedAnswer });
+            if (!question) {
+                return res.status(400).json({ message: 'É necessário informar uma pergunta ou anexar arquivos.' });
             }
-        }
 
-        try {
-            const jobString = await redisClient.get(`job:${jobId}`);
-            if (!jobString) {
-                return res.status(404).json({ message: 'Job não encontrado.' });
-            }
-            const job = JSON.parse(jobString);
-
-            let attachmentArtifacts = [];
-            if (attachments.length > 0) {
-                let storedAttachments;
-                try {
-                    storedAttachments = await storageService.persistUploadedFiles(attachments);
-                } catch (error) {
-                    logger?.error?.(`[Chat-RAG] Job ${jobId}: falha ao armazenar anexos.`, { error });
-                    return res.status(500).json({ message: 'Não foi possível armazenar os anexos enviados.' });
-                }
-
-                const seenHashes = new Set();
-                const uniqueAttachments = storedAttachments.filter(meta => {
-                    if (seenHashes.has(meta.hash)) {
-                        return false;
-                    }
-                    seenHashes.add(meta.hash);
-                    return true;
-                });
-
-                const duplicatesCount = storedAttachments.length - uniqueAttachments.length;
-                if (duplicatesCount > 0) {
-                    logger?.info?.(`[Chat-RAG] Job ${jobId}: ${duplicatesCount} anexo(s) duplicado(s) ignorado(s) com base no hash do conteúdo.`);
-                }
-                if (uniqueAttachments.length === 0) {
-                    logger?.warn?.(`[Chat-RAG] Job ${jobId}: Nenhum anexo único foi processado após a deduplicação.`);
-                }
-
-                try {
-                    attachmentArtifacts = await extractArtifactsFromMetas(uniqueAttachments, storageService);
-                    await indexArtifactsInWeaviate(jobId, attachmentArtifacts, weaviate, embeddingModel).catch((error) => {
-                        logger?.warn?.(`[Chat-RAG] Job ${jobId}: falha ao indexar anexos.`, { error });
-                    });
-                } catch (error) {
-                    logger?.error?.(`[Chat-RAG] Job ${jobId}: falha ao processar anexos.`, { error });
-                    return res.status(500).json({ message: 'Não foi possível processar os anexos enviados.' });
+            let cacheKey;
+            if (useCache) {
+                cacheKey = buildChatCacheKey(jobId, question);
+                const cachedAnswer = await redisClient.get(cacheKey);
+                if (cachedAnswer) {
+                    return res.status(200).json({ answer: cachedAnswer });
                 }
             }
 
-            const contextBlocks = [];
             try {
-                const embeddingResult = await embeddingModel.embedContent(question);
-                const vector = embeddingResult?.embedding?.values || [];
+                const job = req.jobRecord;
+                let attachmentArtifacts = [];
+                if (attachments.length > 0) {
+                    let storedAttachments;
+                    try {
+                        storedAttachments = await storageService.persistUploadedFiles(attachments);
+                    } catch (error) {
+                        logger?.error?.(`[Chat-RAG] Job ${jobId}: falha ao armazenar anexos.`, { error });
+                        return res.status(500).json({ message: 'Não foi possível armazenar os anexos enviados.' });
+                    }
 
-                if (Array.isArray(vector) && vector.length > 0) {
-                    const searchResult = await weaviate.client.graphql
-                        .get()
-                        .withClassName(weaviate.className)
-                        .withFields('content fileName')
-                        .withWhere({ path: ['jobId'], operator: 'Equal', valueText: jobId })
-                        .withNearVector({ vector })
-                        .withLimit(5)
-                        .do();
+                    const seenHashes = new Set();
+                    const uniqueAttachments = storedAttachments.filter(meta => {
+                        if (seenHashes.has(meta.hash)) {
+                            return false;
+                        }
+                        seenHashes.add(meta.hash);
+                        return true;
+                    });
 
-                    const contextChunks = searchResult?.data?.Get?.[weaviate.className] || [];
-                    if (contextChunks.length > 0) {
-                        const ragContext = contextChunks
-                            .map(chunk => `Trecho do arquivo ${chunk.fileName || 'desconhecido'}:\n${chunk.content}`)
-                            .join('\n\n');
-                        contextBlocks.push(`### Contexto indexado\n${ragContext}`);
+                    const duplicatesCount = storedAttachments.length - uniqueAttachments.length;
+                    if (duplicatesCount > 0) {
+                        logger?.info?.(`[Chat-RAG] Job ${jobId}: ${duplicatesCount} anexo(s) duplicado(s) ignorado(s) com base no hash do conteúdo.`);
+                    }
+                    if (uniqueAttachments.length === 0) {
+                        logger?.warn?.(`[Chat-RAG] Job ${jobId}: Nenhum anexo único foi processado após a deduplicação.`);
+                    }
+
+                    try {
+                        attachmentArtifacts = await extractArtifactsFromMetas(uniqueAttachments, storageService);
+                        await indexArtifactsInWeaviate(jobId, attachmentArtifacts, weaviate, embeddingModel).catch((error) => {
+                            logger?.warn?.(`[Chat-RAG] Job ${jobId}: falha ao indexar anexos.`, { error });
+                        });
+                    } catch (error) {
+                        logger?.error?.(`[Chat-RAG] Job ${jobId}: falha ao processar anexos.`, { error });
+                        return res.status(500).json({ message: 'Não foi possível processar os anexos enviados.' });
                     }
                 }
-            } catch (error) {
-                logger?.warn?.(`[Chat-RAG] Job ${jobId}: falha ao consultar o índice cognitivo.`, { error });
-                // Não retorna erro ao usuário, prossegue sem o contexto RAG.
-            }
 
-            const structuredContext = buildJobStructuredContext(job);
-            if (structuredContext) {
-                contextBlocks.push(`### Contexto fiscal estruturado\n${structuredContext}`);
-            }
+                const contextBlocks = [];
+                try {
+                    const embeddingResult = await embeddingModel.embedContent(question);
+                    const vector = embeddingResult?.embedding?.values || [];
 
-            const attachmentContext = buildAttachmentContextFromArtifacts(attachmentArtifacts);
-            if (attachmentContext) {
-                contextBlocks.push(`### Conteúdo dos anexos recentes\n${attachmentContext}`);
-            }
+                    if (Array.isArray(vector) && vector.length > 0) {
+                        const searchResult = await weaviate.client.graphql
+                            .get()
+                            .withClassName(weaviate.className)
+                            .withFields('content fileName')
+                            .withWhere({ path: ['jobId'], operator: 'Equal', valueText: jobId })
+                            .withNearVector({ vector })
+                            .withLimit(5)
+                            .do();
 
-            const knowledgeSource = contextBlocks.length > 0
-                ? contextBlocks.join('\n\n---\n\n')
-                : 'Nenhum contexto adicional foi recuperado. Responda apenas com base em seu conhecimento geral, informando claramente essa limitação.';
+                        const contextChunks = searchResult?.data?.Get?.[weaviate.className] || [];
+                        if (contextChunks.length > 0) {
+                            const ragContext = contextChunks
+                                .map(chunk => `Trecho do arquivo ${chunk.fileName || 'desconhecido'}:\\n${chunk.content}`)
+                                .join('\\n\\n');
+                            contextBlocks.push(`### Contexto indexado\\n${ragContext}`);
+                        }
+                    }
+                } catch (error) {
+                    logger?.warn?.(`[Chat-RAG] Job ${jobId}: falha ao consultar o índice cognitivo.`, { error });
+                }
 
-            const prompt = `
+                const structuredContext = buildJobStructuredContext(job);
+                if (structuredContext) {
+                    contextBlocks.push(`### Contexto fiscal estruturado\\n${structuredContext}`);
+                }
+
+                const attachmentContext = buildAttachmentContextFromArtifacts(attachmentArtifacts);
+                if (attachmentContext) {
+                    contextBlocks.push(`### Conteúdo dos anexos recentes\\n${attachmentContext}`);
+                }
+
+                const knowledgeSource = contextBlocks.length > 0
+                    ? contextBlocks.join('\\n\\n---\\n\\n')
+                    : 'Nenhum contexto adicional foi recuperado. Responda apenas com base em seu conhecimento geral, informando claramente essa limitação.';
+
+                const prompt = `
 Você é um especialista fiscal que atua como copiloto dos agentes internos. Use somente as informações recuperadas, mantendo confidencialidade e clareza.
 
 FONTE DE CONHECIMENTO:
@@ -404,142 +413,145 @@ ${question}
 
 Responda em português, com precisão factual. Se precisar usar ferramentas (ex.: tax_simulation), solicite-as. Se os dados forem insuficientes, explique o que falta e sugira próximos passos.`.trim();
 
-            const chat = model.startChat({
-                tools: availableTools,
-            });
+                const chat = model.startChat({
+                    tools: availableTools,
+                });
 
-            const result = await chat.sendMessage(prompt);
-            const call = result.response.functionCalls()?.[0];
+                const result = await chat.sendMessage(prompt);
+                const call = result.response.functionCalls()?.[0];
 
-            let answer;
-            if (call) {
-                logger?.info?.(`[Chat-RAG] Job ${jobId}: IA solicitou a ferramenta '${call.name}'.`);
-                const toolFn = availableTools[call.name];
-                if (!toolFn) {
-                    throw new Error(`Ferramenta desconhecida solicitada pela IA: ${call.name}`);
+                let answer;
+                if (call) {
+                    logger?.info?.(`[Chat-RAG] Job ${jobId}: IA solicitou a ferramenta '${call.name}'.`);
+                    const toolFn = availableTools[call.name];
+                    if (!toolFn) {
+                        throw new Error(`Ferramenta desconhecida solicitada pela IA: ${call.name}`);
+                    }
+                    const toolResult = await toolFn(call.args);
+                    const finalResult = await chat.sendMessage([{ functionResponse: { name: call.name, response: { content: JSON.stringify(toolResult) } } }]);
+                    answer = finalResult.response.text();
+                } else {
+                    answer = result.response.text();
                 }
-                const toolResult = await toolFn(call.args);
-                const finalResult = await chat.sendMessage([{ functionResponse: { name: call.name, response: { content: JSON.stringify(toolResult) } } }]);
-                answer = finalResult.response.text();
-            } else {
-                answer = result.response.text();
-            }
 
-            if (useCache && cacheKey && answer) {
-                await redisClient.set(cacheKey, answer, { EX: CHAT_CACHE_TTL_SECONDS }).catch(() => {});
-            }
+                if (useCache && cacheKey && answer) {
+                    await redisClient.set(cacheKey, answer, { EX: chatCacheTtlSeconds }).catch(() => {});
+                }
 
-            res.status(200).json({ answer });
-        } catch (error) {
-            logger?.error?.(`[Chat-RAG] Erro no job ${jobId}:`, { error });
-            // Provide a more generic error message to the client for security,
-            // but keep the details in the server log.
-            const isNetworkError = error.message.includes('fetch') || error.message.includes('ECONNREFUSED');
-            const userMessage = isNetworkError
-                ? 'A comunicação com um serviço externo falhou. Por favor, tente novamente mais tarde.'
-                : 'Ocorreu uma falha interna ao processar a sua pergunta.';
-            res.status(500).json({ message: userMessage, code: isNetworkError ? 'EXTERNAL_SERVICE_FAILURE' : 'INTERNAL_ERROR' });
+                res.status(200).json({ answer });
+            } catch (error) {
+                logger?.error?.(`[Chat-RAG] Erro no job ${jobId}:`, { error });
+                const isNetworkError = error.message.includes('fetch') || error.message.includes('ECONNREFUSED');
+                const userMessage = isNetworkError
+                    ? 'A comunicação com um serviço externo falhou. Por favor, tente novamente mais tarde.'
+                    : 'Ocorreu uma falha interna ao processar a sua pergunta.';
+                res.status(500).json({ message: userMessage, code: isNetworkError ? 'EXTERNAL_SERVICE_FAILURE' : 'INTERNAL_ERROR' });
+            }
         }
-    });
+    );
 
-    // --- Endpoint de Exportação Fiscal / Integrações ERP ---
-    router.post('/:jobId/exports', async (req, res) => {
-        const { jobId } = req.params;
-        const format = String(req.body?.format || 'csv').toLowerCase();
-        const allowedFormats = ['sped', 'efd', 'csv', 'ledger'];
+// --- Endpoint de Exportação Fiscal / Integrações ERP ---
+    router.post(
+        '/:jobId/exports',
+        requireScopes(['jobs:read']),
+        loadJobContext,
+        enforceJobOwnership,
+        async (req, res) => {
+            const { jobId } = req.params;
+            const format = String(req.body?.format || 'csv').toLowerCase();
+            const allowedFormats = ['sped', 'efd', 'csv', 'ledger'];
 
-        if (!allowedFormats.includes(format)) {
-            return res.status(400).json({ message: 'Formato de exportação inválido.' });
+            if (!allowedFormats.includes(format)) {
+                return res.status(400).json({ message: 'Formato de exportação inválido.' });
+            }
+
+            try {
+                const job = req.jobRecord;
+                const filesMeta = job.uploadedFiles || [];
+                if (!filesMeta.length) {
+                    return res.status(400).json({ message: 'Nenhum arquivo disponível para exportação.' });
+                }
+
+                const { documentos, log } = await exporterService.extractDocumentsFromStorage(filesMeta, storageService);
+                if (!documentos.length) {
+                    return res.status(400).json({ message: 'Nenhum documento válido foi identificado para exportação.' });
+                }
+
+                let content;
+                let fileName;
+                switch (format) {
+                    case 'sped':
+                        content = exporterService.gerarSpedFiscal(documentos);
+                        fileName = 'SPED_FISCAL.txt';
+                        break;
+                    case 'efd':
+                        content = exporterService.gerarEfdContribuicoes(documentos);
+                        fileName = 'EFD_CONTRIBUICOES.txt';
+                        break;
+                    case 'ledger':
+                        content = exporterService.gerarCsvLancamentos(documentos);
+                        fileName = 'LANCAMENTOS_CONTABEIS.csv';
+                        break;
+                    default:
+                        content = exporterService.gerarCsvERP(documentos);
+                        fileName = 'ERP_IMPORT.csv';
+                        break;
+                }
+
+                res.status(200).json({
+                    fileName,
+                    encoding: 'base64',
+                    content: Buffer.from(content, 'utf8').toString('base64'),
+                    log,
+                    documents: documentos.map(exporterService.summarizeDoc),
+                });
+            } catch (error) {
+                logger?.error?.(`[Exports] Job ${jobId}: falha ao gerar exportação.`, { error });
+                res.status(500).json({ message: 'Falha interna ao gerar a exportação solicitada.' });
+            }
         }
-
-        try {
-            const jobString = await redisClient.get(`job:${jobId}`);
-            if (!jobString) {
-                return res.status(404).json({ message: 'Job não encontrado.' });
-            }
-
-            const job = JSON.parse(jobString);
-            const filesMeta = job.uploadedFiles || [];
-            if (!filesMeta.length) {
-                return res.status(400).json({ message: 'Nenhum arquivo disponível para exportação.' });
-            }
-
-            const { documentos, log } = await exporterService.extractDocumentsFromStorage(filesMeta, storageService);
-            if (!documentos.length) {
-                return res.status(400).json({ message: 'Nenhum documento válido foi identificado para exportação.' });
-            }
-
-            let content;
-            let fileName;
-            switch (format) {
-                case 'sped':
-                    content = exporterService.gerarSpedFiscal(documentos);
-                    fileName = 'SPED_FISCAL.txt';
-                    break;
-                case 'efd':
-                    content = exporterService.gerarEfdContribuicoes(documentos);
-                    fileName = 'EFD_CONTRIBUICOES.txt';
-                    break;
-                case 'ledger':
-                    content = exporterService.gerarCsvLancamentos(documentos);
-                    fileName = 'LANCAMENTOS_CONTABEIS.csv';
-                    break;
-                default:
-                    content = exporterService.gerarCsvERP(documentos);
-                    fileName = 'ERP_IMPORT.csv';
-                    break;
-            }
-
-            res.status(200).json({
-                fileName,
-                encoding: 'base64',
-                content: Buffer.from(content, 'utf8').toString('base64'),
-                log,
-                documents: documentos.map(exporterService.summarizeDoc),
-            });
-        } catch (error) {
-            logger?.error?.(`[Exports] Job ${jobId}: falha ao gerar exportação.`, { error });
-            res.status(500).json({ message: 'Falha interna ao gerar a exportação solicitada.' });
-        }
-    });
+    );
 
     // --- Endpoint de Conciliação Bancária ---
-    router.post('/:jobId/reconciliation', upload.array('statements', 5), async (req, res) => {
-        const { jobId } = req.params;
-        const statementsFiles = req.files || [];
+    router.post(
+        '/:jobId/reconciliation',
+        requireScopes(['jobs:read']),
+        loadJobContext,
+        enforceJobOwnership,
+        upload.array('statements', 5),
+        async (req, res) => {
+            const { jobId } = req.params;
+            const statementsFiles = req.files || [];
 
-        if (statementsFiles.length === 0) {
-            return res.status(400).json({ message: 'Envie pelo menos um arquivo OFX ou CSV.' });
+            if (statementsFiles.length === 0) {
+                return res.status(400).json({ message: 'Envie pelo menos um arquivo OFX ou CSV.' });
+            }
+
+            try {
+                const job = req.jobRecord;
+                const filesMeta = job.uploadedFiles || [];
+                if (!filesMeta.length) {
+                    return res.status(400).json({ message: 'Nenhum documento fiscal disponível para conciliação.' });
+                }
+
+                const { documentos } = await exporterService.extractDocumentsFromStorage(filesMeta, storageService);
+                if (!documentos.length) {
+                    return res.status(400).json({ message: 'Não foi possível recuperar os documentos fiscais para conciliação.' });
+                }
+
+                const transactions = await reconciliationService.parseStatements(statementsFiles);
+                if (!transactions.length) {
+                    return res.status(400).json({ message: 'Os arquivos enviados não contêm transações válidas.' });
+                }
+
+                const result = reconciliationService.reconcile(documentos, transactions);
+                res.status(200).json(result);
+            } catch (error) {
+                logger?.error?.(`[Reconciliation] Job ${jobId}: falha ao conciliar extratos.`, { error });
+                res.status(500).json({ message: 'Falha interna ao executar a conciliação bancária.' });
+            }
         }
-
-        try {
-            const jobString = await redisClient.get(`job:${jobId}`);
-            if (!jobString) {
-                return res.status(404).json({ message: 'Job não encontrado.' });
-            }
-            const job = JSON.parse(jobString);
-            const filesMeta = job.uploadedFiles || [];
-            if (!filesMeta.length) {
-                return res.status(400).json({ message: 'Nenhum documento fiscal disponível para conciliação.' });
-            }
-
-            const { documentos } = await exporterService.extractDocumentsFromStorage(filesMeta, storageService);
-            if (!documentos.length) {
-                return res.status(400).json({ message: 'Não foi possível recuperar os documentos fiscais para conciliação.' });
-            }
-
-            const transactions = await reconciliationService.parseStatements(statementsFiles);
-            if (!transactions.length) {
-                return res.status(400).json({ message: 'Os arquivos enviados não contêm transações válidas.' });
-            }
-
-            const result = reconciliationService.reconcile(documentos, transactions);
-            res.status(200).json(result);
-        } catch (error) {
-            logger?.error?.(`[Reconciliation] Job ${jobId}: falha ao conciliar extratos.`, { error });
-            res.status(500).json({ message: 'Falha interna ao executar a conciliação bancária.' });
-        }
-    });
+    );
 
     return router;
 };

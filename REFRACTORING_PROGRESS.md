@@ -26,5 +26,19 @@ Este documento acompanha a execução sequenciada do plano aprovado. Cada etapa 
 - Registrada a execução integral neste arquivo para rastreabilidade operacional.
 - Todas as etapas planejadas foram concluídas nesta rodada.
 
+## Etapa 5 – Autenticação, Proxy Seguro e Governança de Segredos (Concluída)
+- Ativada uma camada de autenticação JWT opcional (`AUTH_ENABLED`) com middleware dedicado, política de escopos e verificação de posse do job em todas as rotas sensíveis.
+- Criado script `backend/scripts/generateAccessToken.js` e `.env.example` para padronizar geração/rotação de tokens e configuração segura entre frontend e backend.
+- Fortalecido o proxy Gemini com rate limiting determinístico, métricas e exigência do escopo `gemini:invoke`, evitando abuso de tokens pagos.
+- Frontend passou a propagar automaticamente o header `Authorization` em HTTP/WebSocket e remover a chave Gemini do bundle, mantendo a UI intacta (apenas ajustes de infraestrutura).
+- Próxima etapa: **Etapa 6 – TTL/retention Redis e criptografia end-to-end**, conforme plano macro.
+
+## Etapa 6 – Retenção de Jobs, Criptografia e TLS (Concluída)
+- Criado `backend/config/cache.js` e configurados TTLs determinísticos (7 dias) para `job:*` e 15 minutos para caches do chat, garantindo limpeza automática dos registros sem ação manual.
+- `storageService` agora valida `UPLOAD_ENCRYPTION_KEY`, oferece `UPLOAD_ENCRYPTION_REQUIRED` para ambientes restritos e loga quando arquivos forem persistidos em claro.
+- Clientes Redis e Weaviate passaram a aceitar TLS/mTLS (CA customizada, certificados, flags de rejeição), lendo `REDIS_TLS_*`/`WEAVIATE_*` para assegurar conexões cifradas sem alterar a UI.
+- `.env.example` e README foram atualizados com as novas variáveis de retenção, criptografia e TLS, facilitando rollout em diferentes ambientes.
+- Próxima etapa: **Etapa 7 – Auditoria de dependências, CI e cobertura de testes**, conforme roadmap.
+
 ## Encerramento
-Com as quatro etapas entregues, o pipeline agora executa ingestão robusta, analytics determinísticos, UI com visualizações baseadas em dados reais e chat guiado por RAG/token governance. Próximas melhorias podem focar em observabilidade contínua e testes automatizados adicionais.
+Com as seis etapas entregues, o pipeline agora executa ingestão robusta, analytics determinísticos, UI baseada em dados reais, chat guiado por RAG/token governance, perímetro autenticado e políticas de retenção/criptografia alinhadas ao plano. Próximas melhorias podem focar em observabilidade contínua, auditoria de dependências e testes automatizados adicionais.

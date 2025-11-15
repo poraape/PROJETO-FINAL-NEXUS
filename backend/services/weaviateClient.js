@@ -1,9 +1,52 @@
 // backend/services/weaviateClient.js
+const fs = require('fs');
 const weaviateModule = require('weaviate-ts-client');
+const logger = require('./logger').child({ module: 'weaviateClient' });
 const weaviate = weaviateModule.default ?? weaviateModule;
 
-const scheme = process.env.WEAVIATE_SCHEME || 'http';
-const host = process.env.WEAVIATE_HOST || 'localhost:8080';
+function resolveEndpoint() {
+    const envUrl = process.env.WEAVIATE_URL;
+    if (envUrl) {
+        try {
+            const parsed = new URL(envUrl);
+            const scheme = parsed.protocol.replace(':', '');
+            const host = parsed.port ? `${parsed.hostname}:${parsed.port}` : parsed.hostname;
+            return { scheme, host };
+        } catch (error) {
+            logger.warn('[Weaviate] WEAVIATE_URL inválida. Usando variáveis individuais.', { envUrl, error });
+        }
+    }
+    const scheme = process.env.WEAVIATE_SCHEME || 'http';
+    const host = process.env.WEAVIATE_HOST || 'localhost:8080';
+    return { scheme, host };
+}
+
+function configureTls(scheme) {
+    if (scheme !== 'https') return;
+
+    const caFile = process.env.WEAVIATE_TLS_CA_FILE;
+    if (caFile) {
+        if (fs.existsSync(caFile)) {
+            process.env.NODE_EXTRA_CA_CERTS = caFile;
+            logger.info('[Weaviate] Certificado raiz customizado configurado.', { caFile });
+        } else {
+            logger.warn('[Weaviate] Arquivo CA informado não existe.', { caFile });
+        }
+    }
+
+    const rejectUnauthorized = process.env.WEAVIATE_TLS_REJECT_UNAUTHORIZED !== 'false';
+    if (!rejectUnauthorized) {
+        process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+        logger.warn('[Weaviate] Validação TLS desabilitada. Use apenas em ambientes de desenvolvimento.');
+    }
+}
+
+const { scheme, host } = resolveEndpoint();
+const forceTls = process.env.WEAVIATE_FORCE_TLS === 'true';
+if (forceTls && scheme !== 'https') {
+    throw new Error('[Weaviate] WEAVIATE_FORCE_TLS habilitado, porém o endpoint não usa HTTPS.');
+}
+configureTls(scheme);
 const apiKeyValue = process.env.WEAVIATE_API_KEY;
 
 const clientOptions = { scheme, host };
@@ -22,7 +65,7 @@ async function setupSchema() {
         const classExists = schema.classes.some(c => c.class === className);
 
         if (!classExists) {
-            console.log('[Weaviate] Schema não encontrado. Criando...');
+            logger.info('[Weaviate] Schema não encontrado. Criando class DocumentChunk.');
             const schemaConfig = {
                 'class': className,
                 'description': 'Um trecho de um documento fiscal',
@@ -33,12 +76,12 @@ async function setupSchema() {
                 ]
             };
             await client.schema.classCreator().withClass(schemaConfig).do();
-            console.log('[Weaviate] Schema "DocumentChunk" criado com sucesso.');
+            logger.info('[Weaviate] Schema "DocumentChunk" criado com sucesso.');
         } else {
-            console.log('[Weaviate] Schema "DocumentChunk" já existe.');
+            logger.info('[Weaviate] Schema "DocumentChunk" já existe.');
         }
     } catch (error) {
-        console.error("[Weaviate] Falha ao configurar o schema:", error);
+        logger.error('[Weaviate] Falha ao configurar o schema.', { error });
         // Se o Weaviate não estiver rodando, isso pode falhar. A aplicação continuará, mas a indexação não funcionará.
     }
 }

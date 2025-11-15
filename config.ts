@@ -26,17 +26,42 @@ function resolveBackendHost(windowHost: string): string {
   return `${windowHost}:${DEFAULT_BACKEND_PORT}`;
 }
 
+function getServerToken() {
+  return import.meta.env?.VITE_NEXUS_AUTH_TOKEN || undefined;
+}
+
+function getBrowserToken() {
+  const params = new URLSearchParams(window.location.search);
+  const queryToken = params.get('token') ?? undefined;
+  let storedToken: string | undefined;
+  try {
+    storedToken = window.localStorage.getItem('nexus-auth-token') || undefined;
+  } catch (error) {
+    storedToken = undefined;
+  }
+  const envToken = import.meta.env?.VITE_NEXUS_AUTH_TOKEN || undefined;
+  const resolved = queryToken || storedToken || envToken || undefined;
+  if (resolved && storedToken !== resolved) {
+    try {
+      window.localStorage.setItem('nexus-auth-token', resolved);
+    } catch (error) {
+      // Ignora erros de armazenamento (modo privado, etc.)
+    }
+  }
+  return resolved;
+}
+
 function deriveBackendConfig() {
   if (typeof window === 'undefined') {
     const origin = import.meta.env?.VITE_BFF_API_URL || `http://localhost:${DEFAULT_BACKEND_PORT}`;
     return {
       httpOrigin: origin,
       wsOrigin: origin.replace(/^http/i, 'ws'),
-      token: undefined as string | undefined,
+      token: getServerToken(),
     };
   }
 
-  const token = new URLSearchParams(window.location.search).get('token') ?? undefined;
+  const token = getBrowserToken();
 
   if (import.meta.env?.VITE_BFF_API_URL) {
     const explicit = new URL(import.meta.env.VITE_BFF_API_URL, window.location.origin).toString();

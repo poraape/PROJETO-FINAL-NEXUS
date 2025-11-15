@@ -121,7 +121,23 @@ flowchart LR
 - `REDIS_URL` e `WEAVIATE_*`: endpoints e credenciais que apontam para infraestrutura gerenciada; renove as credenciais (usuário/senha, certificados) conforme a política de segurança do ambiente.
 
 Recarregue o backend (`npm run dev` ou `node backend/server.js`) sempre que atualizar variáveis e evite comitar os arquivos `.env`.
-3. **Instale dependências globais**  
+
+#### Retenção, criptografia e TLS
+
+- `JOB_TTL_SECONDS` / `CHAT_CACHE_TTL_SECONDS`: controlam por quanto tempo os snapshots de jobs e respostas de chat permanecem no Redis (padrão 7 dias e 15 minutos, respectivamente).
+- `UPLOAD_ENCRYPTION_KEY` + `UPLOAD_ENCRYPTION_REQUIRED=true`: habilitam/forçam criptografia AES-256-GCM nos arquivos armazenados em `.uploads/`. Sem a chave, o backend alerta que os dados estão em claro.
+- `REDIS_TLS=true` combinado com `REDIS_TLS_CA_FILE`, `REDIS_TLS_CERT_FILE`, `REDIS_TLS_KEY_FILE` e `REDIS_TLS_REJECT_UNAUTHORIZED` garante que o cache utilize TLS (com suporte a mTLS e validação opcional de certificados).
+- `WEAVIATE_URL=https://...`, `WEAVIATE_FORCE_TLS=true`, `WEAVIATE_TLS_CA_FILE` e `WEAVIATE_TLS_REJECT_UNAUTHORIZED` asseguram que o vetor DB opere via HTTPS com CA customizada, evitando handshakes inseguros.
+- Ajuste as variáveis conforme o ambiente (dev vs. prod) para equilibrar retenção, custos de armazenamento e requisitos de compliance (LGPD/SOX).
+
+### Autenticação e tokens de acesso
+
+1. **Habilite o modo autenticado** definindo `AUTH_ENABLED=true`, `JWT_PRIVATE_KEY`, `JWT_ISSUER`, `JWT_AUDIENCE` e `JWT_DEFAULT_SCOPES` (veja `.env.example`).
+2. **Gere tokens assinados**: `cd backend && JWT_PRIVATE_KEY=super-secreto node scripts/generateAccessToken.js --sub analista@nexus.ai --org demo-org --expiresIn 8h`.
+3. **Distribua o token ao frontend** via `VITE_NEXUS_AUTH_TOKEN`, parâmetro `?token=` ou armazenando em `localStorage` (`nexus-auth-token`). O frontend adiciona automaticamente o header `Authorization: Bearer <token>` em todas as chamadas HTTP/WebSocket.
+4. **Escopos recomendados**: `jobs:create jobs:read chat:invoke gemini:invoke`. Revogue tokens comprometidos rotacionando a chave (`JWT_PRIVATE_KEY`).
+
+3. **Instale dependências globais**
    ```bash
    npm install          # frontend packages
    cd backend && npm install

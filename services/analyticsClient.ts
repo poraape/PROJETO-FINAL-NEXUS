@@ -1,5 +1,6 @@
 import { JobAnalytics } from '../types.ts';
 import { buildBackendHttpUrl } from '../config.ts';
+import { authorizedFetch } from './httpClient.ts';
 
 interface AnalyticsResponse {
   ready: boolean;
@@ -18,7 +19,7 @@ export async function fetchJobAnalytics(jobId?: string): Promise<AnalyticsRespon
     return { ready: true, analytics: cache.get(jobId)!, status: 'completed' };
   }
 
-  const response = await fetch(buildBackendHttpUrl(`/api/jobs/${jobId}/analytics`));
+  const response = await authorizedFetch(buildBackendHttpUrl(`/api/jobs/${jobId}/analytics`));
   if (response.status === 202) {
     const body = await response.json();
     return { ready: false, analytics: null, status: body.status || 'processing' };

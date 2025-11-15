@@ -1,6 +1,7 @@
 // services/chatService.ts
 import { ChartConfig, ForecastResult, GeneratedReport, LogError } from '../types.ts';
 import { buildBackendHttpUrl } from '../config.ts';
+import { authorizedFetch } from './httpClient.ts';
 import {
     getAnswer as getCachedAnswer,
     storeAnswer as cacheAnswer,
@@ -45,12 +46,12 @@ export async function getAnswerFromBackend(
             const formData = new FormData();
             formData.append('question', question);
             attachments.forEach(file => formData.append('attachments', file));
-            response = await fetch(endpoint, {
+            response = await authorizedFetch(endpoint, {
                 method: 'POST',
                 body: formData,
             });
         } else {
-            response = await fetch(endpoint, {
+            response = await authorizedFetch(endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ question }),
@@ -306,7 +307,7 @@ async function callGeminiApi(
     };
 
     try {
-        const response = await fetch(buildBackendHttpUrl('/api/gemini'), {
+        const response = await authorizedFetch(buildBackendHttpUrl('/api/gemini'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
