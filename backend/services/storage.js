@@ -146,6 +146,35 @@ function createReadStream(hash) {
     return passthrough;
 }
 
+async function readFileSnippet(hash, length = 4096) {
+    if (!hash) return Buffer.alloc(0);
+
+    if (encryptionEnabled()) {
+        const buffer = await readFileBuffer(hash);
+        return buffer.subarray(0, Math.min(length, buffer.length));
+    }
+
+    const storedPath = path.join(STORAGE_DIR, hash);
+    try {
+        const handle = await fs.promises.open(storedPath, 'r');
+        try {
+            const snippetBuffer = Buffer.alloc(length);
+            const { bytesRead } = await handle.read(snippetBuffer, 0, length, 0);
+            return snippetBuffer.subarray(0, bytesRead);
+        } finally {
+            await handle.close();
+        }
+    } catch (error) {
+        try {
+            const buffer = await fs.promises.readFile(storedPath);
+            return buffer.subarray(0, Math.min(length, buffer.length));
+        } catch (readError) {
+            console.warn('[Storage] Falha ao ler trecho do arquivo.', { hash, error: readError.message });
+            return Buffer.alloc(0);
+        }
+    }
+}
+
 async function cleanupDirectory(dirPath) {
     const files = await fs.promises.readdir(dirPath).catch(() => []);
     const now = Date.now();
@@ -239,5 +268,6 @@ module.exports = {
     persistUploadedFiles,
     readFileBuffer,
     createReadStream,
+    readFileSnippet,
     cleanupOldFiles,
 };

@@ -5,6 +5,7 @@ const Joi = require('joi');
 const crypto = require('crypto');
 const extractor = require('../services/extractor');
 const { buildAnalysisContext } = require('../services/artifactUtils');
+const { buildJobAnalytics } = require('../services/analyticsService');
 const exporterService = require('../services/exporter');
 const reconciliationService = require('../services/reconciliation');
 const pipelineConfig = require('../services/pipelineConfig');
@@ -230,16 +231,19 @@ module.exports = (context) => {
             pipelineState[0].info = `Processando ${storedFiles.length} arquivo(s)...`;
         }
 
+        const ingestionTimestamp = new Date().toISOString();
         const newJob = {
             status: 'processing',
             pipeline: pipelineState,
             result: null,
             error: null,
+            createdAt: ingestionTimestamp,
             uploadedFiles: storedFiles.map(file => ({
                 name: file.originalName,
                 hash: file.hash,
                 size: file.size,
                 mimeType: file.mimeType,
+                ingestedAt: ingestionTimestamp,
             })),
         };
 
@@ -262,6 +266,23 @@ module.exports = (context) => {
         }
 
         res.status(200).json(JSON.parse(jobString));
+    });
+
+    router.get('/:jobId/analytics', async (req, res) => {
+        const { jobId } = req.params;
+        const jobString = await redisClient.get(`job:${jobId}`);
+
+        if (!jobString) {
+            return res.status(404).json({ message: 'Job não encontrado.' });
+        }
+
+        const job = JSON.parse(jobString);
+        if (!job.result) {
+            return res.status(202).json({ status: job.status || 'processing' });
+        }
+
+        const analytics = buildJobAnalytics(job);
+        return res.status(200).json(analytics);
     });
 
     // --- Endpoint de Chat (RAG) ---

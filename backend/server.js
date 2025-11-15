@@ -104,6 +104,7 @@ const PERSISTABLE_RESULT_KEYS = [
     'langChainAuditFindings',
     'langChainClassification',
     'processingMetrics',
+    'dataQualityReport',
 ];
 
 function pickPersistableResult(resultPayload) {
