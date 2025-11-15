@@ -13,9 +13,14 @@ const logger = require('./services/logger').child({ module: 'server' });
 const metrics = require('./services/metrics');
 const storageService = require('./services/storage');
 const pipelineConfig = require('./services/pipelineConfig');
+const telemetryStore = require('./services/telemetryStore');
 const { availableTools, model, embeddingModel } = require('./services/geminiClient');
 const { registerLangChainOrchestrator } = require('./langchain/orchestrator');
 const langchainBridge = require('./services/langchainBridge');
+const security = require('./config/security');
+const { jobTtlSeconds } = require('./config/cache');
+const tokenService = require('./services/tokenService');
+const { extractToken } = require('./middleware/auth');
 
 storageService.init();
 
@@ -104,6 +109,7 @@ const PERSISTABLE_RESULT_KEYS = [
     'langChainAuditFindings',
     'langChainClassification',
     'processingMetrics',
+    'dataQualityReport',
 ];
 
 function pickPersistableResult(resultPayload) {
@@ -131,7 +137,7 @@ async function getJob(jobId) {
 
 async function saveJob(jobId, job) {
     if (!jobId || !job) return;
-    await redisClient.set(`job:${jobId}`, JSON.stringify(job));
+    await redisClient.set(`job:${jobId}`, JSON.stringify(job), { EX: jobTtlSeconds });
     const ws = jobConnections.get(jobId);
     if (ws && ws.readyState === ws.OPEN) {
         ws.send(JSON.stringify(job));
@@ -156,6 +162,10 @@ async function finalizeJob(jobId, { status = 'completed', error, resultPatch } =
     job.error = status === 'failed' ? (error || 'Falha não especificada no pipeline.') : null;
     job.completedAt = new Date().toISOString();
     await saveJob(jobId, job);
+    telemetryStore.recordJobStatus(jobId, status, {
+        error,
+        completedAt: job.completedAt,
+    });
 }
 
 async function startTask(jobId, taskName, payload = {}) {
@@ -164,6 +174,11 @@ async function startTask(jobId, taskName, payload = {}) {
         return;
     }
     try {
+        telemetryStore.recordTaskStart(jobId, taskName, {
+            fileCount: Array.isArray(payload?.filesMeta) ? payload.filesMeta.length : undefined,
+            currentStep: taskName,
+        });
+        telemetryStore.recordJobStatus(jobId, 'processing', { currentStep: taskName });
         await eventBus.emit('task:start', { jobId, taskName, payload });
         const stepIndex = pipelineConfig.getStepIndex(taskName);
         if (stepIndex !== null) {
@@ -187,50 +202,71 @@ async function processFilesInBackground(jobId, filesMeta = []) {
 // --- Configuração do WebSocket Server ---
 const wss = new WebSocketServer({ server }); // Anexa o WebSocket Server ao servidor HTTP
 
-wss.on('connection', (ws, req) => {
-  // O frontend deve se conectar com a URL contendo o jobId, ex: ws://localhost:3001?jobId=...
-  const url = new URL(req.url, `http://${req.headers.host}`);
-  const jobId = url.searchParams.get('jobId');
+wss.on('connection', async (ws, req) => {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const jobId = url.searchParams.get('jobId');
 
-  if (jobId) {
+    if (!jobId) {
+        logger.warn('[BFF-WS] Conexão rejeitada: jobId inválido ou não encontrado.');
+        ws.close(1008, 'Job ID não fornecido.');
+        return;
+    }
+
+    if (security.authEnabled) {
+        const token = extractToken({ headers: req.headers, query: Object.fromEntries(url.searchParams.entries()) });
+        if (!token) {
+            ws.close(1008, 'Token de acesso ausente.');
+            return;
+        }
+        try {
+            const authContext = tokenService.verifyAccessToken(token);
+            const job = await getJob(jobId);
+            if (!job) {
+                ws.close(1008, 'Job não encontrado.');
+                return;
+            }
+            const jobOrg = job.owner?.orgId;
+            if (jobOrg && authContext?.orgId && jobOrg !== authContext.orgId) {
+                ws.close(1008, 'Acesso negado para este job.');
+                return;
+            }
+        } catch (error) {
+            logger.warn('[BFF-WS] Token inválido na conexão WebSocket.', { error: error.message });
+            ws.close(1008, 'Token inválido ou expirado.');
+            return;
+        }
+    }
+
     logger.info(`[BFF-WS] Cliente conectado para o job: ${jobId}`);
     jobConnections.set(jobId, ws);
     metrics.incrementCounter('ws_connections_total');
     metrics.setGauge('ws_connections_active', jobConnections.size);
 
-    // Mantém a conexão viva e detecta clientes inativos
     ws.isAlive = true;
     ws.on('pong', () => { ws.isAlive = true; });
 
-    // Busca o estado atual do job no Redis e envia ao cliente
-    redisClient.get(`job:${jobId}`).then(jobString => { // Busca o estado inicial do job
+    redisClient.get(`job:${jobId}`).then(jobString => {
         if (jobString && ws.readyState === ws.OPEN) {
             ws.send(jobString);
-        } else if (!jobString) {
-            logger.warn(`[BFF-WS] Tentativa de conexão para job inexistente: ${jobId}`);
-            if (ws.readyState === ws.OPEN) {
-                ws.send(JSON.stringify({ jobId, status: 'not_found', error: `Job com ID ${jobId} não encontrado.` }));
-            }
+        } else if (!jobString && ws.readyState === ws.OPEN) {
+            ws.send(JSON.stringify({ jobId, status: 'not_found', error: `Job com ID ${jobId} não encontrado.` }));
         }
     }).catch(err => {
         logger.error(`[BFF-WS] Erro ao buscar job ${jobId} do Redis para conexão inicial.`, { error: err });
-        // Informa o cliente sobre a falha interna.
-        ws.send(JSON.stringify({ error: 'Ocorreu um erro interno ao buscar os dados do job.' }));
+        if (ws.readyState === ws.OPEN) {
+            ws.send(JSON.stringify({ error: 'Ocorreu um erro interno ao buscar os dados do job.' }));
+        }
     });
 
     ws.on('close', () => {
-      logger.info(`[BFF-WS] Cliente desconectado do job: ${jobId}`);
-      jobConnections.delete(jobId);
-      metrics.setGauge('ws_connections_active', jobConnections.size);
+        logger.info(`[BFF-WS] Cliente desconectado do job: ${jobId}`);
+        jobConnections.delete(jobId);
+        metrics.setGauge('ws_connections_active', jobConnections.size);
     });
 
     ws.on('error', (error) => {
         logger.error(`[BFF-WS] Erro na conexão do job ${jobId}:`, { error });
     });
-  } else {
-    logger.warn(`[BFF-WS] Conexão rejeitada: jobId inválido ou não encontrado.`);
-    ws.close();
-  }
 });
 
 // Intervalo para verificar e fechar conexões inativas
@@ -248,6 +284,9 @@ const wsHealthCheckInterval = setInterval(() => {
 eventBus.on('task:completed', async ({ jobId, taskName, resultPayload, payload }) => {
     try {
         const persistable = pickPersistableResult(resultPayload);
+        telemetryStore.recordTaskEnd(jobId, taskName, 'completed', {
+            resultKeys: persistable ? Object.keys(persistable) : undefined,
+        });
         if (persistable) {
             await mergeJobResult(jobId, persistable);
         }
@@ -268,6 +307,7 @@ eventBus.on('task:failed', async ({ jobId, taskName, error }) => {
     if (stepIndex !== null) {
         await updateJobStatus(jobId, stepIndex, 'failed', error);
     }
+    telemetryStore.recordTaskEnd(jobId, taskName, 'failed', { error });
     await finalizeJob(jobId, { status: 'failed', error });
 });
 

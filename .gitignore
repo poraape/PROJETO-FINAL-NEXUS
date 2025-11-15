@@ -29,6 +29,9 @@ backend/.env
 # --- Relatórios de Teste ---
 # Gerado por frameworks de teste como Jest.
 coverage/
+dependency-audit-report.json
+reports/dependency-audit-report.json
+reports/load-test-report.json
 
 # --- Dados de Tempo de Execução ---
 # Gerados pelo Docker e pela aplicação durante a execução.

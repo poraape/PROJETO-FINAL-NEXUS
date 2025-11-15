@@ -1,6 +1,9 @@
 process.env.GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'test-key';
 process.env.NODE_ENV = 'test';
 
+jest.mock('multer');
+jest.mock('../services/storage', () => require('./helpers/storageMock'));
+
 const mockRedisClient = {
     get: jest.fn(),
     set: jest.fn(),
@@ -99,7 +102,7 @@ describe('Exports and reconciliation endpoints', () => {
             const response = await requestApp(app, {
                 method: 'POST',
                 path: `/api/jobs/${jobId}/exports`,
-                json: { format: 'pdf' },
+                multipart: { fields: { format: 'pdf' } },
             });
 
             expect(response.status).toBe(400);
@@ -110,7 +113,7 @@ describe('Exports and reconciliation endpoints', () => {
             const response = await requestApp(app, {
                 method: 'POST',
                 path: `/api/jobs/${jobId}/exports`,
-                json: { format: 'csv' },
+                multipart: { fields: { format: 'csv' } },
             });
 
             expect(response.status).toBe(200);

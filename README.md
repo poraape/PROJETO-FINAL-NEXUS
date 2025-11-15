@@ -121,7 +121,23 @@ flowchart LR
 - `REDIS_URL` e `WEAVIATE_*`: endpoints e credenciais que apontam para infraestrutura gerenciada; renove as credenciais (usuário/senha, certificados) conforme a política de segurança do ambiente.
 
 Recarregue o backend (`npm run dev` ou `node backend/server.js`) sempre que atualizar variáveis e evite comitar os arquivos `.env`.
-3. **Instale dependências globais**  
+
+#### Retenção, criptografia e TLS
+
+- `JOB_TTL_SECONDS` / `CHAT_CACHE_TTL_SECONDS`: controlam por quanto tempo os snapshots de jobs e respostas de chat permanecem no Redis (padrão 7 dias e 15 minutos, respectivamente).
+- `UPLOAD_ENCRYPTION_KEY` + `UPLOAD_ENCRYPTION_REQUIRED=true`: habilitam/forçam criptografia AES-256-GCM nos arquivos armazenados em `.uploads/`. Sem a chave, o backend alerta que os dados estão em claro.
+- `REDIS_TLS=true` combinado com `REDIS_TLS_CA_FILE`, `REDIS_TLS_CERT_FILE`, `REDIS_TLS_KEY_FILE` e `REDIS_TLS_REJECT_UNAUTHORIZED` garante que o cache utilize TLS (com suporte a mTLS e validação opcional de certificados).
+- `WEAVIATE_URL=https://...`, `WEAVIATE_FORCE_TLS=true`, `WEAVIATE_TLS_CA_FILE` e `WEAVIATE_TLS_REJECT_UNAUTHORIZED` asseguram que o vetor DB opere via HTTPS com CA customizada, evitando handshakes inseguros.
+- Ajuste as variáveis conforme o ambiente (dev vs. prod) para equilibrar retenção, custos de armazenamento e requisitos de compliance (LGPD/SOX).
+
+### Autenticação e tokens de acesso
+
+1. **Habilite o modo autenticado** definindo `AUTH_ENABLED=true`, `JWT_PRIVATE_KEY`, `JWT_ISSUER`, `JWT_AUDIENCE` e `JWT_DEFAULT_SCOPES` (veja `.env.example`).
+2. **Gere tokens assinados**: `cd backend && JWT_PRIVATE_KEY=super-secreto node scripts/generateAccessToken.js --sub analista@nexus.ai --org demo-org --expiresIn 8h`.
+3. **Distribua o token ao frontend** via `VITE_NEXUS_AUTH_TOKEN`, parâmetro `?token=` ou armazenando em `localStorage` (`nexus-auth-token`). O frontend adiciona automaticamente o header `Authorization: Bearer <token>` em todas as chamadas HTTP/WebSocket.
+4. **Escopos recomendados**: `jobs:create jobs:read chat:invoke gemini:invoke`. Revogue tokens comprometidos rotacionando a chave (`JWT_PRIVATE_KEY`).
+
+3. **Instale dependências globais**
    ```bash
    npm install          # frontend packages
    cd backend && npm install
@@ -181,16 +197,21 @@ Recarregue o backend (`npm run dev` ou `node backend/server.js`) sempre que atua
 
 ## Monitoramento, logs e métricas
 
-- Logs estruturados com contexto (módulo, job, task) em `backend/services/logger.js`; backend redireciona `stdout` para `backend.log`.  
-- Métricas in-memory com formato Prometheus via `backend/services/metrics.js`; expostas em `/metrics` para scraping.  
+- Logs estruturados com contexto (módulo, job, task) em `backend/services/logger.js`; backend redireciona `stdout` para `backend.log`.
+- Métricas in-memory com formato Prometheus via `backend/services/metrics.js`; expostas em `/metrics` para scraping.
 - LangChain registra `langchain_chain_runs_total`, `langchain_chain_duration_ms`, `langchain_chain_success_total`, `langchain_chain_failure_total`.
+- Telemetria contínua em `backend/services/telemetryStore.js`, que armazena cronogramas de tarefas, duração média por etapa e status do job.
+- Rotas `/api/observability/overview` e `/api/observability/jobs/:jobId` disponibilizam snapshots de saúde e timelines rastreáveis (mesmo quando a UI não consome essas informações).
 
-## Testes e validação
+## Testes, cobertura e auditoria de dependências
 
-- **Backend**: `cd backend && npm test -- <suite>` (ex.: `langchainOrchestrator`, `jobsStatus`, `health`). Usa Jest com mocks de Redis, Weaviate e Gemini.  
-- **Pipeline end-to-end**: `cd backend && npm test -- pipelineE2E` simula o job completo e valida a persistência das propriedades `langChain*`.  
-- **Frontend**: `npm run build` valida bundling.  
-- Execute `npm run lint` no backend para validação de estilo (ESLint).  
+- **Backend (unitário/integrado)**: `cd backend && npm test -- <suite>` (ex.: `langchainOrchestrator`, `jobsStatus`, `health`). O comando padrão roda em modo `--runInBand` para evitar condições de corrida com mocks.
+- **Cobertura oficial**: `cd backend && npm run test:coverage`. Gera `coverage/lcov-report` e respeita os thresholds globais (20% linhas/estatements, 15% funções, 10% branches). O workflow CI publica o artefato automaticamente.
+- **Pipeline end-to-end**: `cd backend && npm test -- pipelineE2E` simula o job completo e valida a persistência das propriedades `langChain*`.
+- **Frontend**: `npm run build` garante bundling consistente.
+- **Lint**: execute `cd backend && npm run lint` para garantir o padrão ESLint.
+- **Auditoria de dependências**: `npm run deps:audit` gera `reports/dependency-audit-report.json` consolidando `npm outdated` + `npm audit` para raiz e backend. Use esse relatório antes de abrir PRs.
+- **Teste de carga determinístico**: `npm run load:test` (opcional) emite requisições paralelas para `/api/health`, `/metrics` e `/api/observability/overview`, grava `reports/load-test-report.json` e permite ajustar `LOADTEST_*` (BASE_URL, CONCURRENCY, DURATION_MS, ENDPOINTS).
 - Para testes end-to-end manuais: suba `start-dev.sh`, faça upload de arquivos fiscais, consulte `/api/jobs/:jobId/status` e abra o dashboard em `http://localhost:8000`.
 
 ## Contribuição e licenciamento

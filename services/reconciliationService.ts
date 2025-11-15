@@ -1,4 +1,5 @@
 import { buildBackendHttpUrl } from '../config.ts';
+import { authorizedFetch } from './httpClient.ts';
 import { ReconciliationResult } from '../types.ts';
 
 export async function conciliarExtratos(jobId: string, files: File[]): Promise<ReconciliationResult> {
@@ -12,7 +13,7 @@ export async function conciliarExtratos(jobId: string, files: File[]): Promise<R
     const formData = new FormData();
     files.forEach((file) => formData.append('statements', file));
 
-    const response = await fetch(buildBackendHttpUrl(`/api/jobs/${jobId}/reconciliation`), {
+    const response = await authorizedFetch(buildBackendHttpUrl(`/api/jobs/${jobId}/reconciliation`), {
         method: 'POST',
         body: formData,
     });

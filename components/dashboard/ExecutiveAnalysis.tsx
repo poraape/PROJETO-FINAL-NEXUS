@@ -1,7 +1,7 @@
 
 // Fix: Implementing the ExecutiveAnalysis component to display report data.
 import React from 'react';
-import { AggregatedMetricsSummary, ExecutiveSummary, ProcessingMetrics } from '../../types.ts';
+import { AggregatedMetricsSummary, ExecutiveSummary, JobAnalytics, ProcessingMetrics, DataQualityReport } from '../../types.ts';
 import { MetricCard } from './MetricCard';
 import { NfeTrendChart } from './NfeTrendChart';
 import { TaxChart } from './TaxChart';
@@ -9,11 +9,15 @@ import { PaperIcon } from '../icons/PaperIcon';
 import { CsvAnalysisInsights } from './CsvAnalysisInsights';
 import { AggregatedFileSummary } from './AggregatedFileSummary';
 import { ProcessingOverview } from './ProcessingOverview';
+import { CfopBreakdownChart } from './CfopBreakdownChart';
+import { DataQualitySummary } from './DataQualitySummary';
 
 interface ExecutiveAnalysisProps {
   summary: ExecutiveSummary;
   processingMetrics?: ProcessingMetrics;
   aggregatedSummary?: AggregatedMetricsSummary | null;
+  analytics?: JobAnalytics | null;
+  dataQualityReport?: DataQualityReport | null;
 }
 
 const formatCurrency = (value: number) => {
@@ -23,7 +27,7 @@ const formatCurrency = (value: number) => {
   }).format(value);
 };
 
-export const ExecutiveAnalysis: React.FC<ExecutiveAnalysisProps> = ({ summary, processingMetrics, aggregatedSummary }) => {
+export const ExecutiveAnalysis: React.FC<ExecutiveAnalysisProps> = ({ summary, processingMetrics, aggregatedSummary, analytics, dataQualityReport }) => {
   if (!summary || !summary.keyMetrics) {
     return (
       <div className="bg-bg-secondary backdrop-blur-xl rounded-3xl border border-border-glass shadow-glass p-6 h-full">
@@ -64,7 +68,12 @@ export const ExecutiveAnalysis: React.FC<ExecutiveAnalysisProps> = ({ summary, p
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
         <TaxChart metrics={summary.keyMetrics} />
-        <NfeTrendChart value={summary.keyMetrics.valorTotalDasNfes} />
+        <NfeTrendChart series={analytics?.timeSeries} fallbackValue={summary.keyMetrics.valorTotalDasNfes} />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+        <CfopBreakdownChart entries={analytics?.cfopBreakdown} />
+        <DataQualitySummary report={analytics?.dataQuality || dataQualityReport || null} />
       </div>
 
       {summary.csvInsights && summary.csvInsights.length > 0 && (

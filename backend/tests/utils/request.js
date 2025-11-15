@@ -148,6 +148,12 @@ async function request(app, options = {}) {
 
         const { req, socket } = createRequest({ ...options, headers }, buffer);
         const res = createResponse(req, socket, resolve);
+        req.__multipartPayload = options.multipart;
+        if (options.json !== undefined) {
+            req.body = options.json;
+        } else if (!req.body && options.multipart?.fields) {
+            req.body = { ...options.multipart.fields };
+        }
         req.app = app;
         req.res = res;
         res.req = req;

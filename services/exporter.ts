@@ -3,6 +3,7 @@ import { xml2json } from 'xml-js';
 import { DocumentoFiscalDetalhado } from '../types';
 import { validarDocumentoCompleto } from './rulesValidator.ts';
 import { buildBackendHttpUrl } from '../config.ts';
+import { authorizedFetch } from './httpClient.ts';
 
 // Helper to simplify JSON from XML
 const simplifyJson = (obj: any): any => {
@@ -189,7 +190,7 @@ export async function exportarFiscalViaBackend(
     jobId: string,
     format: 'sped' | 'efd' | 'csv' | 'lancamentos'
 ): Promise<{ fileName: string; content: string; log: string[]; documents?: any[] }> {
-    const response = await fetch(buildBackendHttpUrl(`/api/jobs/${jobId}/exports`), {
+    const response = await authorizedFetch(buildBackendHttpUrl(`/api/jobs/${jobId}/exports`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ format }),

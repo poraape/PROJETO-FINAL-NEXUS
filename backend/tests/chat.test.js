@@ -1,6 +1,9 @@
 process.env.GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'test-key';
 process.env.NODE_ENV = 'test';
 
+jest.mock('multer');
+jest.mock('../services/storage', () => require('./helpers/storageMock'));
+
 const mockRedisClient = {
     get: jest.fn(),
     set: jest.fn(),
@@ -21,18 +24,28 @@ jest.mock('../services/langchainClient', () => ({
     diagnostics: jest.fn().mockResolvedValue({ ready: true }),
     reset: jest.fn(),
 }));
-jest.mock('../services/geminiClient', () => ({
-    embeddingModel: {
-        embedContent: jest.fn(),
-        batchEmbedContents: jest.fn().mockResolvedValue({ embeddings: [] }),
-    },
-    model: {
-        startChat: jest.fn(),
-    },
-    availableTools: {
-        tax_simulation: jest.fn(),
-    },
-}));
+jest.mock('../services/geminiClient', () => {
+    const defaultSendMessage = () => ({
+        response: {
+            text: () => '',
+            functionCalls: () => [],
+        },
+    });
+    return {
+        embeddingModel: {
+            embedContent: jest.fn(),
+            batchEmbedContents: jest.fn().mockResolvedValue({ embeddings: [] }),
+        },
+        model: {
+            startChat: jest.fn(() => ({
+                sendMessage: jest.fn().mockResolvedValue(defaultSendMessage()),
+            })),
+        },
+        availableTools: {
+            tax_simulation: jest.fn(),
+        },
+    };
+});
 
 jest.mock('../services/weaviateClient', () => {
     const builder = {
@@ -100,6 +113,15 @@ describe('POST /api/jobs/:jobId/chat', () => {
         jest.clearAllMocks();
         langchainBridge.resetJob(jobId);
         langchainClient.runChat.mockResolvedValue({ answer: 'Resposta LangChain', knowledgeBase: '' });
+        const defaultChatMock = {
+            sendMessage: jest.fn().mockResolvedValue({
+                response: {
+                    text: () => 'Resposta LangChain',
+                    functionCalls: () => [],
+                },
+            }),
+        };
+        geminiClient.model.startChat.mockReturnValue(defaultChatMock);
         geminiClient.embeddingModel.embedContent.mockReset();
         geminiClient.embeddingModel.batchEmbedContents.mockReset().mockResolvedValue({ embeddings: [] });
         geminiClient.availableTools.tax_simulation.mockReset();
@@ -119,7 +141,7 @@ describe('POST /api/jobs/:jobId/chat', () => {
         const response = await requestApp(app, {
             method: 'POST',
             path: `/api/jobs/${jobId}/chat`,
-            json: {},
+            multipart: { fields: {} },
         });
 
         expect(response.status).toBe(400);
@@ -127,17 +149,22 @@ describe('POST /api/jobs/:jobId/chat', () => {
     });
 
     it('should return a direct answer if no context is found', async () => {
-        langchainClient.runChat.mockResolvedValueOnce({ answer: 'Sem contexto disponível.', knowledgeBase: '' });
+        const sendMessageMock = jest.fn().mockResolvedValue({
+            response: {
+                text: () => 'Sem contexto disponível.',
+                functionCalls: () => [],
+            },
+        });
+        geminiClient.model.startChat.mockReturnValue({ sendMessage: sendMessageMock });
 
         const response = await requestApp(app, {
             method: 'POST',
             path: `/api/jobs/${jobId}/chat`,
-            json: { question: 'Qual o valor total?' },
+            multipart: { fields: { question: 'Qual o valor total?' } },
         });
 
         expect(response.status).toBe(200);
         expect(response.body.answer).toBe('Sem contexto disponível.');
-        expect(langchainClient.runChat).toHaveBeenCalled();
         expect(mockRedisClient.set).toHaveBeenCalledWith(
             expect.stringContaining(`job:${jobId}:chat:`),
             'Sem contexto disponível.',
@@ -148,7 +175,6 @@ describe('POST /api/jobs/:jobId/chat', () => {
     it('should get a RAG-based answer from the AI', async () => {
         const question = 'Qual o valor total?';
         const aiAnswer = 'O valor total é R$ 1.234,56.';
-        langchainClient.runChat.mockResolvedValueOnce({ answer: aiAnswer, knowledgeBase: 'contexto' });
 
         geminiClient.embeddingModel.embedContent.mockResolvedValue({ embedding: { values: [0.1, 0.2] } });
         const builder = createGraphQLBuilder();
@@ -168,18 +194,16 @@ describe('POST /api/jobs/:jobId/chat', () => {
         const response = await requestApp(app, {
             method: 'POST',
             path: `/api/jobs/${jobId}/chat`,
-            json: { question },
+            multipart: { fields: { question } },
         });
 
         expect(response.status).toBe(200);
         expect(response.body.answer).toBe(aiAnswer);
-        expect(langchainClient.runChat).toHaveBeenCalled();
     });
 
     it('should handle a tool call from the AI during chat', async () => {
         const question = 'Simule os impostos para 10000.';
         const finalAiAnswer = 'A simulação para R$ 10.000,00 resultou em um total de R$ 1.500,00 em impostos.';
-        langchainClient.runChat.mockResolvedValueOnce({ answer: finalAiAnswer, knowledgeBase: 'contexto' });
 
         geminiClient.embeddingModel.embedContent.mockResolvedValue({ embedding: { values: [0.3, 0.4] } });
         const builder = createGraphQLBuilder();
@@ -199,17 +223,14 @@ describe('POST /api/jobs/:jobId/chat', () => {
         const response = await requestApp(app, {
             method: 'POST',
             path: `/api/jobs/${jobId}/chat`,
-            json: { question },
+            multipart: { fields: { question } },
         });
 
         expect(response.status).toBe(200);
         expect(response.body.answer).toBe(finalAiAnswer);
-        expect(langchainClient.runChat).toHaveBeenCalled();
     });
 
     it('should process attachments on the backend and skip caching', async () => {
-        langchainClient.runChat.mockResolvedValueOnce({ answer: 'Anexos analisados com sucesso.', knowledgeBase: 'contexto' });
-
         const response = await requestApp(app, {
             method: 'POST',
             path: `/api/jobs/${jobId}/chat`,
@@ -220,7 +241,6 @@ describe('POST /api/jobs/:jobId/chat', () => {
         });
 
         expect(response.status).toBe(200);
-        expect(langchainClient.runChat).toHaveBeenCalled();
         expect(mockRedisClient.set).not.toHaveBeenCalled();
     });
 });

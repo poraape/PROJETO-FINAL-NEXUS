@@ -1,4 +1,15 @@
 const EventEmitter = require('events');
+
+const mockReviewChain = { call: jest.fn() };
+const mockAuditChain = { call: jest.fn() };
+const mockClassificationChain = { call: jest.fn() };
+
+jest.mock('../langchain/chains', () => ({
+    createReviewChain: jest.fn(() => mockReviewChain),
+    createAuditChain: jest.fn(() => mockAuditChain),
+    createClassificationChain: jest.fn(() => mockClassificationChain),
+}));
+
 const { registerLangChainOrchestrator } = require('../langchain/orchestrator');
 const { createWeaviateMock } = require('./helpers/weaviateMock');
 
@@ -17,6 +28,9 @@ describe('End-to-end pipeline simulation', () => {
     beforeEach(() => {
         jobStore = new Map();
         metricsMock = createMetricsMock();
+        mockReviewChain.call.mockReset().mockResolvedValue({ langChainAudit: 'review' });
+        mockAuditChain.call.mockReset().mockResolvedValue({ langChainAuditFindings: 'audit' });
+        mockClassificationChain.call.mockReset().mockResolvedValue({ langChainClassification: 'classification' });
         const mergeJobResult = jest.fn(async (jobId, data) => {
             const job = jobStore.get(jobId) ?? { result: {} };
             job.result = { ...(job.result || {}), ...(data || {}) };

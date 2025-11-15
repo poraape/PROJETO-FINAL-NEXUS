@@ -15,6 +15,7 @@ import {
 } from './services/contextMemory.ts';
 import { iniciarAuditoriaAutomatica } from './services/auditorAgent.ts';
 import { buildBackendHttpUrl, buildBackendWsUrl } from './config.ts';
+import { authorizedFetch } from './services/httpClient.ts';
 
 type View = 'upload' | 'processing' | 'dashboard';
 
@@ -37,7 +38,7 @@ function App() {
   useEffect(() => {
     const initializeApp = () => {
         iniciarAuditoriaAutomatica();
-        console.log("[App Init] Application ready. Using secure embedded API key.");
+        console.log('[App Init] Application ready. Using authenticated session token.');
         const lastReport = getLastGeneratedReport();
         if (lastReport) {
             setGeneratedReport(lastReport);
@@ -89,7 +90,7 @@ function App() {
 
     try {
       // 1. Inicia o job no backend
-      const response = await fetch(buildBackendHttpUrl('/api/jobs'), {
+      const response = await authorizedFetch(buildBackendHttpUrl('/api/jobs'), {
         method: 'POST',
         body: formData,
       });

@@ -78,6 +78,79 @@ export interface ProcessingMetrics {
   documents: DocumentProcessingMetric[];
 }
 
+export interface DataQualityIssue {
+  severity: 'info' | 'warning' | 'error';
+  message: string;
+}
+
+export interface DataQualityFileReport {
+  hash: string;
+  name: string;
+  size: number;
+  mimeType: string;
+  structuredType: string;
+  encoding: string;
+  encodingConfidence: number;
+  issues: string[];
+  warnings: string[];
+}
+
+export interface DataQualityReport {
+  generatedAt: string;
+  files: DataQualityFileReport[];
+  totals: {
+    files: number;
+    structured: number;
+    warnings: number;
+    errors: number;
+  };
+  encodingStats: Record<string, number>;
+}
+
+export interface JobAnalyticsTimeSeriesPoint {
+  period: string;
+  documents: number;
+  totalValue: number;
+  fileNames?: string[];
+}
+
+export interface JobAnalyticsCategoryEntry {
+  label: string;
+  value: number;
+  documents: number;
+  sources?: string[];
+}
+
+export interface JobAnalyticsTotals {
+  documents: number;
+  nfeValue: number;
+  productsValue: number;
+  taxes: {
+    icms: number;
+    pis: number;
+    cofins: number;
+    iss: number;
+  };
+  auditFindings: number;
+}
+
+export interface JobAnalyticsSourceMap {
+  timeSeries: { period: string; files: string[] }[];
+  cfops: { cfop: string; files: string[] }[];
+  customers: { customer: string; files: string[] }[];
+}
+
+export interface JobAnalytics {
+  ready: boolean;
+  generatedAt: string;
+  totals: JobAnalyticsTotals;
+  timeSeries: JobAnalyticsTimeSeriesPoint[];
+  cfopBreakdown: JobAnalyticsCategoryEntry[];
+  customerBreakdown: JobAnalyticsCategoryEntry[];
+  dataQuality: DataQualityReport | null;
+  sourceMap: JobAnalyticsSourceMap;
+}
+
 export interface AggregatedMetricsSummary {
   totalFiles: number;
   totalBytes: number;
@@ -101,6 +174,7 @@ export interface GeneratedReport {
   langChainAuditFindings?: string;
   langChainClassification?: string;
   processingMetrics?: ProcessingMetrics;
+  dataQualityReport?: DataQualityReport | null;
 }
 
 export interface AuditValidationDetail {
@@ -285,6 +359,8 @@ export interface ChatMessage {
   sender: 'user' | 'ai';
   content: string;
   chartData?: ChartConfig | null;
+  sources?: string[];
+  origin?: 'analytics' | 'rag' | 'llm';
 }
 
 export interface DocumentoFiscalDetalhado {

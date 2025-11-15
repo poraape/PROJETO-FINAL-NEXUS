@@ -1,7 +1,6 @@
 // backend/agents/extractionAgent.js
 
-const extractor = require('../services/extractor');
-const { buildProcessingMetrics } = require('../services/artifactUtils');
+const { ingestFiles } = require('../services/ingestionPipeline');
 
 function register({ eventBus, updateJobStatus, storageService }) {
     eventBus.on('task:start', async ({ jobId, taskName, payload }) => {
@@ -11,8 +10,12 @@ function register({ eventBus, updateJobStatus, storageService }) {
             const { filesMeta } = payload;
             await updateJobStatus(jobId, 0, 'in-progress', `Descompactando e lendo ${filesMeta.length} arquivo(s)...`);
 
-            const { artifacts, fileContentsForAnalysis } = await extractor.extractArtifactsForFiles(filesMeta, storageService);
-            const processingMetrics = buildProcessingMetrics(artifacts, filesMeta);
+            const {
+                artifacts,
+                fileContentsForAnalysis,
+                processingMetrics,
+                dataQualityReport,
+            } = await ingestFiles(filesMeta, storageService);
             const nextPayload = {
                 ...payload,
                 artifacts,
@@ -23,7 +26,7 @@ function register({ eventBus, updateJobStatus, storageService }) {
             eventBus.emit('task:completed', {
                 jobId,
                 taskName,
-                resultPayload: { fileContentsForAnalysis, artifacts, processingMetrics },
+                resultPayload: { fileContentsForAnalysis, artifacts, processingMetrics, dataQualityReport },
                 payload: nextPayload,
             });
         } catch (error) {

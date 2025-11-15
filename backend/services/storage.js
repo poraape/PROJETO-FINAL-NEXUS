@@ -9,6 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { PassThrough } = require('stream');
+const logger = require('./logger').child({ module: 'storageService' });
 
 const TMP_DIR = process.env.UPLOAD_TMP_DIR || path.join(__dirname, '..', '..', '.uploads', 'tmp');
 const STORAGE_DIR = process.env.UPLOAD_STORAGE_DIR || path.join(__dirname, '..', '..', '.uploads', 'objects');
@@ -18,6 +19,7 @@ const CLEANUP_INTERVAL_MINUTES = parseInt(process.env.UPLOAD_CLEANUP_INTERVAL_MI
 const isTestEnv = process.env.NODE_ENV === 'test' || Boolean(process.env.JEST_WORKER_ID);
 const ENCRYPTION_HEADER = Buffer.from('NQI2');
 const ENCRYPTION_ALGO = 'aes-256-gcm';
+const ENCRYPTION_REQUIRED = process.env.UPLOAD_ENCRYPTION_REQUIRED === 'true';
 
 function deriveEncryptionKey() {
     const rawKey = process.env.UPLOAD_ENCRYPTION_KEY;
@@ -33,6 +35,15 @@ function deriveEncryptionKey() {
 }
 
 const ENCRYPTION_KEY = deriveEncryptionKey();
+
+if (!ENCRYPTION_KEY) {
+    if (ENCRYPTION_REQUIRED) {
+        throw new Error('[Storage] UPLOAD_ENCRYPTION_REQUIRED está ativo, mas nenhuma chave de criptografia válida foi configurada.');
+    }
+    logger.warn('[Storage] UPLOAD_ENCRYPTION_KEY não definido. Os arquivos serão armazenados em claro.');
+} else {
+    logger.info('[Storage] Criptografia AES-256-GCM habilitada para uploads.');
+}
 
 function encryptionEnabled() {
     return Boolean(ENCRYPTION_KEY);
@@ -146,6 +157,35 @@ function createReadStream(hash) {
     return passthrough;
 }
 
+async function readFileSnippet(hash, length = 4096) {
+    if (!hash) return Buffer.alloc(0);
+
+    if (encryptionEnabled()) {
+        const buffer = await readFileBuffer(hash);
+        return buffer.subarray(0, Math.min(length, buffer.length));
+    }
+
+    const storedPath = path.join(STORAGE_DIR, hash);
+    try {
+        const handle = await fs.promises.open(storedPath, 'r');
+        try {
+            const snippetBuffer = Buffer.alloc(length);
+            const { bytesRead } = await handle.read(snippetBuffer, 0, length, 0);
+            return snippetBuffer.subarray(0, bytesRead);
+        } finally {
+            await handle.close();
+        }
+    } catch (error) {
+        try {
+            const buffer = await fs.promises.readFile(storedPath);
+            return buffer.subarray(0, Math.min(length, buffer.length));
+        } catch (readError) {
+            logger.warn('[Storage] Falha ao ler trecho do arquivo.', { hash, error: readError.message });
+            return Buffer.alloc(0);
+        }
+    }
+}
+
 async function cleanupDirectory(dirPath) {
     const files = await fs.promises.readdir(dirPath).catch(() => []);
     const now = Date.now();
@@ -176,7 +216,7 @@ function scheduleCleanup() {
     const intervalMs = CLEANUP_INTERVAL_MINUTES * 60 * 1000;
     setInterval(() => {
         cleanupOldFiles().catch(err => {
-            console.warn('[Storage] Falha ao executar limpeza programada:', err);
+            logger.warn('[Storage] Falha ao executar limpeza programada.', { error: err });
         });
     }, intervalMs).unref?.();
 }
@@ -239,5 +279,6 @@ module.exports = {
     persistUploadedFiles,
     readFileBuffer,
     createReadStream,
+    readFileSnippet,
     cleanupOldFiles,
 };

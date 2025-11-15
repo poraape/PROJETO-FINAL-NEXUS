@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { GeneratedReport, SimulationResult, ChatMessage } from '../../types.ts';
+import { GeneratedReport, SimulationResult, ChatMessage, JobAnalytics } from '../../types.ts';
 import { UserAvatarIcon } from '../icons/UserAvatarIcon.tsx';
 import { ChatChart } from './ChatChart.tsx';
 import { useErrorLog } from '../../hooks/useErrorLog.ts';
@@ -7,6 +7,7 @@ import { PaperclipIcon } from '../icons/PaperclipIcon.tsx';
 import { XCircleIcon } from '../icons/XCircleIcon.tsx';
 import { getAnswerFromBackend, getChatResponse, generateChartConfigFromData } from '../../services/chatService.ts';
 import { storeFeedback } from '../../services/contextMemory.ts';
+import { buildStructuredAnalyticsAnswer } from '../../services/dataExplorer.ts';
 
 const ATTACHMENT_DEFAULT_PROMPT = 'Analise os arquivos anexados e traga os principais insights e alertas tributários relacionados.';
 
@@ -35,12 +36,13 @@ const ThumbsDownIcon: React.FC<React.SVGProps<SVGSVGElement>> = (props) => (
 );
 
 
-export const InteractiveChat: React.FC<{
+export const InteractiveChat: React.FC<{ 
   report: GeneratedReport;
   simulationResult: SimulationResult | null;
   processedFiles: File[];
   jobId?: string;
-}> = ({ report, simulationResult, processedFiles, jobId }) => {
+  analytics?: JobAnalytics | null;
+}> = ({ report, simulationResult, processedFiles, jobId, analytics }) => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
@@ -112,6 +114,7 @@ export const InteractiveChat: React.FC<{
     setInput('');
     setAttachedFiles([]);
     setIsTyping(true);
+    const attachments = currentFiles;
 
     try {
       const trimmedQuestion = currentInput.trim();
@@ -121,6 +124,21 @@ export const InteractiveChat: React.FC<{
 
       if (!normalizedQuestion) {
         throw new Error('Informe uma pergunta para continuar.');
+      }
+
+      if (!isChartRequest && attachments.length === 0) {
+        const structuredAnswer = buildStructuredAnalyticsAnswer(normalizedQuestion, analytics);
+        if (structuredAnswer) {
+          const aiResponse: ChatMessage = {
+            sender: 'ai',
+            content: structuredAnswer.answer,
+            sources: structuredAnswer.sources,
+            origin: 'analytics',
+          };
+          setMessages(prev => [...prev, aiResponse]);
+          setIsTyping(false);
+          return;
+        }
       }
 
       if (isChartRequest) {
@@ -205,6 +223,12 @@ export const InteractiveChat: React.FC<{
                  <div className={`p-3 rounded-2xl ${msg.sender === 'ai' ? 'bg-bg-secondary-opaque/80' : 'bg-blue-600'}`}>
                     <p className={`text-sm whitespace-pre-wrap leading-relaxed ${msg.sender === 'ai' ? 'text-content-emphasis' : 'text-white'}`}>{msg.content}</p>
                     {msg.chartData && <ChatChart data={msg.chartData} />}
+                    {msg.sources && msg.sources.length > 0 && (
+                      <p className="text-[11px] text-content-default/60 mt-2">Fontes: {msg.sources.join(', ')}</p>
+                    )}
+                    {msg.origin === 'analytics' && (
+                      <p className="text-[11px] text-content-default/50 mt-1">Resposta calculada diretamente sobre os dados indexados.</p>
+                    )}
                  </div>
                  {msg.sender === 'ai' && !isTyping && (
                      <div className="mt-1.5 flex items-center gap-2">

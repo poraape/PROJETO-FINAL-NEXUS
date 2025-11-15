@@ -17,6 +17,7 @@ import {
   cacheAggregatedMetrics,
   getCachedAggregatedMetrics,
 } from '../../services/aggregatedMetricsCache.ts';
+import { useJobAnalytics } from '../../hooks/useJobAnalytics.ts';
 
 interface DashboardProps {
   initialReport: GeneratedReport;
@@ -58,6 +59,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ initialReport, processedFi
   const [isComparing, setIsComparing] = useState(false);
   const [comparisonError, setComparisonError] = useState<string | null>(null);
   const [progressMessage, setProgressMessage] = useState<string | null>(null);
+  const analyticsState = useJobAnalytics(jobId || null);
 
   const handleStartComparison = useCallback(async () => {
     if (isComparing || processedFiles.length < 2) return;
@@ -130,6 +132,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ initialReport, processedFi
                 summary={report.executiveSummary}
                 processingMetrics={report.processingMetrics}
                 aggregatedSummary={aggregatedSummary}
+                analytics={analyticsState.data}
+                dataQualityReport={report.dataQualityReport || null}
               />
             )}
             {view === 'simulator' && <TaxSimulator report={report} onSimulationComplete={setSimulationResult} logError={logError} />}
@@ -166,6 +170,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ initialReport, processedFi
               simulationResult={simulationResult}
               processedFiles={processedFiles}
               jobId={jobId || undefined}
+              analytics={analyticsState.data}
             />
         </div>
       </div>
